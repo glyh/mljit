@@ -1,0 +1,5 @@
+CompileFlags:
+  # Keep clangd on the same CMake/Ninja build tree that produced the module BMIs.
+  # Server-side flags such as --experimental-modules-support cannot be set here;
+  # pass those from the editor/LSP client. See docs/clangd-neovim.md.
+  CompilationDatabase: build/debug
