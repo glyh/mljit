@@ -105,13 +105,13 @@ Initial modules:
 
 ```text
 mljit.ir       // data model + builders
-mljit.ir.dump  // textual dump
+mljit.ir.printer  // textual dump
 ```
 
 Future modules:
 
 ```text
-mljit.ir.verify
+mljit.ir.verifier
 mljit.ir.interp
 ```
 

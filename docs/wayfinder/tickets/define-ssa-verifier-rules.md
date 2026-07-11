@@ -23,7 +23,7 @@ Milestone 1 gets a real SSA verifier, not only structural validation. The verifi
 
 ### Module/API boundary
 
-- Verifier implementation lives in `mljit.ir.verify` (`src/ir_verify.cppm`) in the existing `mljit-lib` target.
+- Verifier implementation lives in `mljit.ir.verifier` (`src/ir_verifier.cppm`) in the existing `mljit-lib` target.
 - Public entry point:
 
 ```cpp
@@ -41,7 +41,7 @@ struct VerifyResult {
 ```
 
 - The verifier accumulates all errors in one run; it does not bail on first error.
-- Dominance analysis is private inside `mljit.ir.verify` for v1. Promote it later into an analysis module only if optimizer/backend work needs it.
+- Dominance analysis is private inside `mljit.ir.verifier` for v1. Promote it later into an analysis module only if optimizer/backend work needs it.
 
 ### Diagnostic model
 
