@@ -9,6 +9,7 @@ target_sources(mljit-lib
       FILES
         ir.cppm
         ir_dump.cppm
+        ir_verify.cppm
 )
 
 target_compile_features(mljit-lib PUBLIC cxx_std_26)
