@@ -9,11 +9,11 @@ module;
 #include <cassert>
 #include <functional>
 
-export module mljit.ir.verify;
+export module mljit.ir.verifier;
 
 import mljit.ir;
 
-export namespace mljit::ir::verify {
+export namespace mljit::ir::verifier {
 
 // ── Error kinds ────────────────────────────────────────────
 enum class VerifyErrorKind {
@@ -462,4 +462,4 @@ auto verify(Module const& mod) -> VerifyResult {
   return VerifyResult{std::move(errors)};
 }
 
-} // namespace mljit::ir::verify
+} // namespace mljit::ir::verifier

@@ -1,6 +1,6 @@
 // ml-jit entry point — C++26 modules
 import mljit.ir;
-import mljit.ir.dump;
+import mljit.ir.printer;
 
 #include <print>
 #include <cstdlib>

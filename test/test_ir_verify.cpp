@@ -1,12 +1,12 @@
 // SSA IR verifier tests — positive (valid) and negative (error-kind) cases.
 import mljit.ir;
-import mljit.ir.verify;
+import mljit.ir.verifier;
 
 #include <catch2/catch_test_macros.hpp>
 #include <variant>
 
 using namespace mljit::ir;
-namespace verify_ns = mljit::ir::verify;
+namespace verifier = mljit::ir::verifier;
 
 // ── Test-only helpers for constructing malformed IR ─────────
 // These mutate exported IR structs directly, bypassing builder
@@ -62,7 +62,7 @@ TEST_CASE("valid add1 verifies ok", "[verify]") {
   fb.ret(entry, sum);
 
   auto mod = mb.finish();
-  CHECK(verify_ns::verify(mod).ok());
+  CHECK(verifier::verify(mod).ok());
 }
 
 TEST_CASE("valid block-param abs verifies ok", "[verify]") {
@@ -87,7 +87,7 @@ TEST_CASE("valid block-param abs verifies ok", "[verify]") {
   fb.ret(done, result);
 
   auto mod = mb.finish();
-  CHECK(verify_ns::verify(mod).ok());
+  CHECK(verifier::verify(mod).ok());
 }
 
 TEST_CASE("valid cross-function call verifies ok", "[verify]") {
@@ -112,7 +112,7 @@ TEST_CASE("valid cross-function call verifies ok", "[verify]") {
   }
 
   auto mod = mb.finish();
-  CHECK(verify_ns::verify(mod).ok());
+  CHECK(verifier::verify(mod).ok());
 }
 
 // ── Entry param used directly in successor (dominates regression) ──
@@ -136,7 +136,7 @@ TEST_CASE("entry param dominates successor", "[verify]") {
     fb.ret(recurse, zero);
   }
   auto mod = mb.finish();
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK(res.ok());
 }
 
@@ -149,11 +149,11 @@ TEST_CASE("missing terminator detected", "[verify][neg]") {
   auto no_term_fid = mb.create_function({}, Type::i64, "no_term"); // no builder called -> no terminator
   (void)no_term_fid;
   auto mod = mb.finish();
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::MissingTerminator) found = true;
+    if (e.kind == verifier::VerifyErrorKind::MissingTerminator) found = true;
   CHECK(found);
 }
 
@@ -169,11 +169,11 @@ TEST_CASE("invalid block target detected", "[verify][neg]") {
   // Replace entry terminator with jump to non-existent block
   set_jump(mod, fid, BlockId{0}, BlockId{999}, {});
 
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::InvalidBlockTarget) found = true;
+    if (e.kind == verifier::VerifyErrorKind::InvalidBlockTarget) found = true;
   CHECK(found);
 }
 
@@ -193,11 +193,11 @@ TEST_CASE("block argument count mismatch detected", "[verify][neg]") {
   // Add extra param to target so jump args (1) < target params (2)
   add_block_param(mod, fid, BlockId{1}, Type::i64);
 
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::BlockArgumentCountMismatch) found = true;
+    if (e.kind == verifier::VerifyErrorKind::BlockArgumentCountMismatch) found = true;
   CHECK(found);
 }
 
@@ -216,11 +216,11 @@ TEST_CASE("block argument type mismatch detected", "[verify][neg]") {
   // Change target param to i1 — jump provides i64 → mismatch
   set_block_param_type(mod, fid, BlockId{1}, 0, Type::i1);
 
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::BlockArgumentTypeMismatch) found = true;
+    if (e.kind == verifier::VerifyErrorKind::BlockArgumentTypeMismatch) found = true;
   CHECK(found);
 }
 
@@ -237,11 +237,11 @@ TEST_CASE("return type mismatch detected", "[verify][neg]") {
   // Change function return type to i1 — ret value is i64 → mismatch
   mod.functions[fid.value].return_type = Type::i1;
 
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::ReturnTypeMismatch) found = true;
+    if (e.kind == verifier::VerifyErrorKind::ReturnTypeMismatch) found = true;
   CHECK(found);
 }
 
@@ -266,11 +266,11 @@ TEST_CASE("call argument count mismatch detected", "[verify][neg]") {
   // Add a param to callee — now callee has 2 params, call still has 1 arg
   add_block_param(mod, callee, BlockId{0}, Type::i64);
 
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::CallArgumentCountMismatch) found = true;
+    if (e.kind == verifier::VerifyErrorKind::CallArgumentCountMismatch) found = true;
   CHECK(found);
 }
 
@@ -295,11 +295,11 @@ TEST_CASE("call argument type mismatch detected", "[verify][neg]") {
   // Change callee's entry param to i1 — caller provides i64 → mismatch
   set_block_param_type(mod, callee, BlockId{0}, 0, Type::i1);
 
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::CallArgumentTypeMismatch) found = true;
+    if (e.kind == verifier::VerifyErrorKind::CallArgumentTypeMismatch) found = true;
   CHECK(found);
 }
 
@@ -325,11 +325,11 @@ TEST_CASE("branch condition not i1 detected", "[verify][neg]") {
              ValueId{0}, BlockId{1}, {},
              BlockId{2}, {});
 
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::BranchConditionTypeMismatch) found = true;
+    if (e.kind == verifier::VerifyErrorKind::BranchConditionTypeMismatch) found = true;
   CHECK(found);
 }
 
@@ -347,11 +347,11 @@ TEST_CASE("unreachable block detected", "[verify][neg]") {
   }
 
   auto mod = mb.finish();
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::UnreachableBlock) found = true;
+    if (e.kind == verifier::VerifyErrorKind::UnreachableBlock) found = true;
   CHECK(found);
 }
 
@@ -382,11 +382,11 @@ TEST_CASE("use does not dominate detected", "[verify][neg]") {
   }
 
   auto mod = mb.finish();
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::UseDoesNotDominate) { found = true; break; }
+    if (e.kind == verifier::VerifyErrorKind::UseDoesNotDominate) { found = true; break; }
   CHECK(found);
 }
 
@@ -413,10 +413,10 @@ TEST_CASE("invalid function target detected", "[verify][neg]") {
   // Corrupt callee reference to non-existent FunctionId
   corrupt_call_callee(mod, caller, call_iid, FunctionId{999});
 
-  auto res = verify_ns::verify(mod);
+  auto res = verifier::verify(mod);
   CHECK_FALSE(res.ok());
   bool found = false;
   for (auto const& e : res.errors)
-    if (e.kind == verify_ns::VerifyErrorKind::InvalidFunctionTarget) { found = true; break; }
+    if (e.kind == verifier::VerifyErrorKind::InvalidFunctionTarget) { found = true; break; }
   CHECK(found);
 }

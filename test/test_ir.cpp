@@ -1,12 +1,12 @@
 // SSA IR tests — verifies ModuleBuilder, FunctionBuilder, and dump output.
 import mljit.ir;
-import mljit.ir.dump;
+import mljit.ir.printer;
 
 #include <catch2/catch_test_macros.hpp>
 #include <string>
 
 using namespace mljit::ir;
-namespace dump = mljit::ir::dump;
+namespace printer = mljit::ir::printer;
 
 // ── Straight-line add1 (full snapshot) ─────────────────────
 //
@@ -29,7 +29,7 @@ TEST_CASE("add1 straight-line snapshot", "[ir]") {
   fb.ret(entry, sum);
 
   auto mod   = mb.finish();
-  auto text  = dump::to_text(mod);
+  auto text  = printer::to_text(mod);
 
   auto expected =
     "func @add1(i64) -> i64 {\n"
@@ -79,7 +79,7 @@ TEST_CASE("abs block-param control-flow snapshot", "[ir]") {
   fb.ret(done, result);
 
   auto mod   = mb.finish();
-  auto text  = dump::to_text(mod);
+  auto text  = printer::to_text(mod);
 
   auto expected =
     "func @abs(i64) -> i64 {\n"
@@ -113,7 +113,7 @@ TEST_CASE("isub and imul snapshot", "[ir]") {
   (void)diff;
 
   auto mod  = mb.finish();
-  auto text = dump::to_text(mod);
+  auto text = printer::to_text(mod);
 
   // Snapshot uses stable value numbering — entry params v0,v1,
   // then instruction results v2,v3.
@@ -149,7 +149,7 @@ TEST_CASE("all icmp predicates snapshot", "[ir]") {
   fb.ret(entry, one);
 
   auto mod  = mb.finish();
-  auto text = dump::to_text(mod);
+  auto text = printer::to_text(mod);
 
   auto expected =
     "func @cmp_all(i64) -> i64 {\n"
@@ -205,7 +205,7 @@ TEST_CASE("call instruction cross-function snapshot", "[ir]") {
   }
 
   auto mod  = mb.finish();
-  auto text = dump::to_text(mod);
+  auto text = printer::to_text(mod);
 
   auto expected =
     "func @add1(i64) -> i64 {\n"
@@ -243,7 +243,7 @@ TEST_CASE("zero-param function snapshot", "[ir]") {
   }
 
   auto mod  = mb.finish();
-  auto text = dump::to_text(mod);
+  auto text = printer::to_text(mod);
 
   auto expected =
     "func @answer() -> i64 {\n"
@@ -292,7 +292,7 @@ TEST_CASE("multi-function independent module snapshot", "[ir]") {
   }
 
   auto mod  = mb.finish();
-  auto text = dump::to_text(mod);
+  auto text = printer::to_text(mod);
 
   auto expected =
     "func @add1(i64) -> i64 {\n"
@@ -316,6 +316,6 @@ TEST_CASE("multi-function independent module snapshot", "[ir]") {
 TEST_CASE("empty module dump", "[ir]") {
   ModuleBuilder mb;
   auto mod  = mb.finish();
-  auto text = dump::to_text(mod);
+  auto text = printer::to_text(mod);
   CHECK(text.empty());
 }

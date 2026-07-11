@@ -6,7 +6,7 @@ module;
 #include <format>
 #include <variant>
 
-export module mljit.ir.dump;
+export module mljit.ir.printer;
 
 import mljit.ir;
 
@@ -129,7 +129,7 @@ auto fmt_term(
 
 // ── Public API ─────────────────────────────────────────────
 
-export namespace mljit::ir::dump {
+export namespace mljit::ir::printer {
 
 auto to_text(Module const& mod) -> std::string {
   std::string out;
@@ -178,4 +178,4 @@ auto to_text(Module const& mod) -> std::string {
   return out;
 }
 
-} // namespace mljit::ir::dump
+} // namespace mljit::ir::printer

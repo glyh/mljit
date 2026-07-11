@@ -15,8 +15,8 @@ This document captures the implementation conventions for MLJIT. The design map 
 - Functions, variables, and namespaces: `snake_case`.
 - Private data members: trailing underscore, e.g. `blocks_`.
 - True constants: `kPascalCase`.
-- Module names: lowercase dotted names, e.g. `mljit.ir.verify`.
-- File names: lowercase with underscores when needed, e.g. `ir_dump.cppm`.
+- Module names: lowercase dotted names, e.g. `mljit.ir.verifier`.
+- File names: lowercase with underscores when needed, e.g. `ir_printer.cppm`.
 - Prefer explicit return types with trailing return syntax for nontrivial APIs:
 
 ```cpp
@@ -40,8 +40,8 @@ Likely modules:
 ```text
 mljit.util
 mljit.ir
-mljit.ir.dump
-mljit.ir.verify
+mljit.ir.printer
+mljit.ir.verifier
 mljit.ir.interp
 mljit.trace
 mljit.frontend
