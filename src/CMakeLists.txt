@@ -7,7 +7,6 @@ target_sources(mljit-lib
     FILE_SET CXX_MODULES
       BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
       FILES
-        util.cppm
         ir.cppm
         ir_dump.cppm
 )
