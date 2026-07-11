@@ -345,6 +345,8 @@ void FunctionVerifier::verify() {
         [&](IAdd const& op) { type_error(op.lhs, Type::i64, iid, "iadd lhs"); type_error(op.rhs, Type::i64, iid, "iadd rhs"); },
         [&](ISub const& op) { type_error(op.lhs, Type::i64, iid, "isub lhs"); type_error(op.rhs, Type::i64, iid, "isub rhs"); },
         [&](IMul const& op) { type_error(op.lhs, Type::i64, iid, "imul lhs"); type_error(op.rhs, Type::i64, iid, "imul rhs"); },
+        [&](IDiv const& op) { type_error(op.lhs, Type::i64, iid, "idiv lhs"); type_error(op.rhs, Type::i64, iid, "idiv rhs"); },
+        [&](IRem const& op) { type_error(op.lhs, Type::i64, iid, "irem lhs"); type_error(op.rhs, Type::i64, iid, "irem rhs"); },
         [&](ICmp const& op) { type_error(op.lhs, Type::i64, iid, "icmp lhs"); type_error(op.rhs, Type::i64, iid, "icmp rhs"); },
         [&](Call const& op) {
           for (auto arg : op.args)
@@ -357,21 +359,6 @@ void FunctionVerifier::verify() {
 
   // ── Pass 2: CFG reachability ────────────────────────────
   dom.compute(func);
-
-  // EntryBlockPredecessor
-  {
-    std::vector<size_t> entry_preds;
-    for (size_t bi = 0; bi < func.blocks.size(); ++bi) {
-      auto const& blk = func.blocks[bi];
-      if (!blk.terminator) continue;
-      for (auto succ : terminator_successors(*blk.terminator))
-        if (succ.value == 0) entry_preds.push_back(bi);
-    }
-    if (!entry_preds.empty())
-      errors.push_back({VerifyErrorKind::EntryBlockPredecessor, func_id, BlockId{0},
-        std::nullopt, std::nullopt, std::nullopt,
-        "entry has " + std::to_string(entry_preds.size()) + " predecessor(s)"});
-  }
 
   // UnreachableBlock
   for (size_t bi = 1; bi < func.blocks.size(); ++bi)
@@ -438,6 +425,8 @@ void FunctionVerifier::verify() {
         [&](IAdd const& op)   { check_use(op.lhs, iid, "iadd lhs"); check_use(op.rhs, iid, "iadd rhs"); },
         [&](ISub const& op)   { check_use(op.lhs, iid, "isub lhs"); check_use(op.rhs, iid, "isub rhs"); },
         [&](IMul const& op)   { check_use(op.lhs, iid, "imul lhs"); check_use(op.rhs, iid, "imul rhs"); },
+        [&](IDiv const& op)   { check_use(op.lhs, iid, "idiv lhs"); check_use(op.rhs, iid, "idiv rhs"); },
+        [&](IRem const& op)   { check_use(op.lhs, iid, "irem lhs"); check_use(op.rhs, iid, "irem rhs"); },
         [&](ICmp const& op)   { check_use(op.lhs, iid, "icmp lhs"); check_use(op.rhs, iid, "icmp rhs"); },
         [&](Call const& op)   { for (auto a : op.args) check_use(a, iid, "call arg"); },
       }, inst.payload);

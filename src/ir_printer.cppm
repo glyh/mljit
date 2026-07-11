@@ -69,6 +69,12 @@ auto fmt_inst_op(
     [&](IMul const& op) -> std::string {
       return std::format("imul {}, {}", value_label(op.lhs, names), value_label(op.rhs, names));
     },
+    [&](IDiv const& op) -> std::string {
+      return std::format("idiv {}, {}", value_label(op.lhs, names), value_label(op.rhs, names));
+    },
+    [&](IRem const& op) -> std::string {
+      return std::format("irem {}, {}", value_label(op.lhs, names), value_label(op.rhs, names));
+    },
     [&](ICmp const& op) -> std::string {
       return std::format("icmp {} {}, {}",
         to_string(op.cond),

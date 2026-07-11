@@ -311,6 +311,35 @@ TEST_CASE("multi-function independent module snapshot", "[ir]") {
   CHECK(text == expected);
 }
 
+// ── idiv/irem dump ─────────────────────────────────────────
+
+TEST_CASE("idiv and irem snapshot", "[ir]") {
+  ModuleBuilder mb;
+  auto fid = mb.create_function({Type::i64, Type::i64}, Type::i64, "divrem");
+  auto fb = mb.function_builder(fid);
+  auto entry = fb.entry_block();
+  auto x = fb.param_id(entry, 0);
+  auto y = fb.param_id(entry, 1);
+
+  auto q = fb.idiv(entry, x, y);
+  auto r = fb.irem(entry, x, y);
+  fb.ret(entry, r);
+  (void)q;
+
+  auto mod  = mb.finish();
+  auto text = printer::to_text(mod);
+
+  auto expected =
+    "func @divrem(i64, i64) -> i64 {\n"
+    "^entry(v0: i64, v1: i64):\n"
+    "  v2: i64 = idiv v0, v1\n"
+    "  v3: i64 = irem v0, v1\n"
+    "  ret v3\n"
+    "}\n";
+
+  CHECK(text == expected);
+}
+
 // ── empty module edge case ──────────────────────────────────
 
 TEST_CASE("empty module dump", "[ir]") {

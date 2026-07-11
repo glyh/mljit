@@ -10,6 +10,7 @@ target_sources(mljit-lib
         ir.cppm
         ir_printer.cppm
         ir_verifier.cppm
+        ir_runtime.cppm
 )
 
 target_compile_features(mljit-lib PUBLIC cxx_std_26)

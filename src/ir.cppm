@@ -64,10 +64,12 @@ struct ConstI64 { int64_t value = 0; };
 struct IAdd     { ValueId lhs; ValueId rhs; };
 struct ISub     { ValueId lhs; ValueId rhs; };
 struct IMul     { ValueId lhs; ValueId rhs; };
+struct IDiv     { ValueId lhs; ValueId rhs; };
+struct IRem     { ValueId lhs; ValueId rhs; };
 struct ICmp     { IcmpCond cond; ValueId lhs; ValueId rhs; };
 struct Call     { FunctionId callee; std::vector<ValueId> args; };
 
-using InstPayload = std::variant<ConstI64, IAdd, ISub, IMul, ICmp, Call>;
+using InstPayload = std::variant<ConstI64, IAdd, ISub, IMul, IDiv, IRem, ICmp, Call>;
 
 // ── Terminator payload structs ─────────────────────────────
 struct Ret    { ValueId value; };
@@ -187,6 +189,10 @@ public:
   [[nodiscard]] auto isub(BlockId block, ValueId lhs, ValueId rhs,
     std::optional<std::string> name = std::nullopt) -> ValueId;
   [[nodiscard]] auto imul(BlockId block, ValueId lhs, ValueId rhs,
+    std::optional<std::string> name = std::nullopt) -> ValueId;
+  [[nodiscard]] auto idiv(BlockId block, ValueId lhs, ValueId rhs,
+    std::optional<std::string> name = std::nullopt) -> ValueId;
+  [[nodiscard]] auto irem(BlockId block, ValueId lhs, ValueId rhs,
     std::optional<std::string> name = std::nullopt) -> ValueId;
   [[nodiscard]] auto icmp(BlockId block, IcmpCond cond, ValueId lhs, ValueId rhs,
     std::optional<std::string> name = std::nullopt) -> ValueId;
@@ -344,6 +350,22 @@ inline auto FunctionBuilder::imul(
   assert(lookup_type(lhs) == Type::i64 && "imul lhs must be i64");
   assert(lookup_type(rhs) == Type::i64 && "imul rhs must be i64");
   return append_instruction(block, Type::i64, IMul{lhs, rhs}, std::move(name));
+}
+
+inline auto FunctionBuilder::idiv(
+  BlockId block, ValueId lhs, ValueId rhs, std::optional<std::string> name
+) -> ValueId {
+  assert(lookup_type(lhs) == Type::i64 && "idiv lhs must be i64");
+  assert(lookup_type(rhs) == Type::i64 && "idiv rhs must be i64");
+  return append_instruction(block, Type::i64, IDiv{lhs, rhs}, std::move(name));
+}
+
+inline auto FunctionBuilder::irem(
+  BlockId block, ValueId lhs, ValueId rhs, std::optional<std::string> name
+) -> ValueId {
+  assert(lookup_type(lhs) == Type::i64 && "irem lhs must be i64");
+  assert(lookup_type(rhs) == Type::i64 && "irem rhs must be i64");
+  return append_instruction(block, Type::i64, IRem{lhs, rhs}, std::move(name));
 }
 
 inline auto FunctionBuilder::icmp(
