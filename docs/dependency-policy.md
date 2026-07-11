@@ -25,8 +25,8 @@ Avoid by default:
 - LLVM as a backend dependency;
 - asmjit or external JIT abstractions;
 - fmt/spdlog/Quill as core logging infrastructure;
-- broad framework-heavy architecture;
-- parser-combinator libraries for the frontend.
+- broad framework-heavy architecture (scoped ANTLR4 for the frontend is an approved exception; see Accepted Dependencies below);
+- parser-combinator libraries for the frontend (ANTLR4 supersedes this rule).
 
 ## Acquisition
 
@@ -52,6 +52,20 @@ Scope:
 - acquired through Nix flake;
 - integrated through CMake/CTest;
 - must not leak into `mljit-lib` or compiler core APIs.
+
+### ANTLR4 (C++ runtime)
+
+Status: accepted, scoped.
+
+Scope:
+
+- grammars live in `src/frontend/MLJIT.g4`;
+- generated lexer/parser/visitor files are committed in `src/frontend/generated/`;
+- ANTLR4 runtime headers and static library are linked into `mljit-antlr-gen` (an OBJECT library in `src/frontend/CMakeLists.txt`);
+- the `mljit.frontend` module (`src/frontend.cppm`) is the only TU that sees ANTLR4 types — the public module API returns only project-owned `ir::Module` and `CompileError`;
+- acquired through Nix flake (`pkgs.antlr4_13`, `pkgs.antlr4_13.runtime.cpp`, `pkgs.jre`).
+
+Rule: **ANTLR4 is allowed for the frontend only.** Generated code is compiled as C++17 with `-Wno-unused-parameter` to suppress sempred diagnostics; the rest of the project stays C++26 / module-first.
 
 ## Current rejected/deferred dependencies
 
