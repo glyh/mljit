@@ -14,7 +14,8 @@
       "cacheVariables": {
         "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_EXPORT_NO_PACKAGE_REGISTRY": "ON"
+        "CMAKE_EXPORT_NO_PACKAGE_REGISTRY": "ON",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
       }
     },
     {
