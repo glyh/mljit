@@ -8,6 +8,8 @@ target_sources(mljit-lib
       BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
       FILES
         util.cppm
+        ir.cppm
+        ir_dump.cppm
 )
 
 target_compile_features(mljit-lib PUBLIC cxx_std_26)
