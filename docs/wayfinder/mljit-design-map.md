@@ -35,6 +35,7 @@ Standing preferences and constraints for this effort:
 - Milestone 1 is the SSA IR package: data model, textual dump format, verifier, i64 interpreter, and hand-built fib/gcd IR tests; no x86 yet.
 - Prefer value semantics and strongly typed IDs for the canonical IR, with controlled mutable/ref-like backend artifacts later.
 - Start with a fixed explicit pass pipeline; evolve into a pass manager when the project has enough passes/backends to justify it.
+- Use a function-at-a-time compilation driver: SSA is the only module-level round-trippable IR; Machine IR is transient per-function backend state; x64 emission streams into a code buffer.
 - Build a project-owned x64 assembler layer; do not depend on asmjit.
 - v1 register allocation should be linear scan with spill support.
 - Expose stable textual phase dumps from day one.
@@ -50,7 +51,7 @@ Standing preferences and constraints for this effort:
 
 - Parser generator final choice is still pending research. The current leaning is Bison C++ skeleton plus re2c, but this should be decided in [Choose the Generated Frontend Stack](tickets/choose-generated-frontend-stack.md).
 - The exact shape of the mutable/ref-like backend layer is intentionally deferred until SSA IR and the first backend lowering artifacts exist.
-- Machine IR design is visible but not yet sharp enough: it depends on the SSA IR data model, x64 assembler layer, and register allocator boundary.
+- Machine IR persistence policy is decided: it should be transient per-function backend state. Its concrete instruction/value/block shape should be specified in [Design the Transient Machine IR Boundary](tickets/design-transient-machine-ir-boundary.md) after the SSA IR data model is sketched.
 - Runtime representation beyond i64 is deferred: closures, heap objects, ADTs, tuples, strings, tagging, and GC/refcounting should only graduate after the i64 register backend is demonstrably working.
 - Benchmark presentation details are deferred until fib/gcd run under both interpreter and native backend.
 - CI/vcpkg caching strategy is deferred until the first dependency manifest lands and the Catch2 test target exists.
