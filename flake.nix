@@ -27,6 +27,9 @@
                 packages = [
                   pkgs.cmake
                   pkgs.ninja
+                  pkgs.antlr4_13
+                  pkgs.antlr4_13.runtime.cpp
+                  pkgs.jre
                   pkgs.catch2_3
                   pkgs.pkg-config
                   pkgs.git
