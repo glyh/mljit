@@ -6,3 +6,5 @@ compile_commands.json
 gcm.cache/
 *.pcm
 *.gcm
+
+/.direnv

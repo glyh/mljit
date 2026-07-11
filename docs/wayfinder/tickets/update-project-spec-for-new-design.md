@@ -15,7 +15,7 @@ blocked_by:
 
 How should `PROJECT.md` be revised so it no longer describes the older bytecode-template-JIT/C++20 plan and instead reflects the agreed MLJIT direction?
 
-The update should capture C++26 modules, Clang/CMake/Ninja, vcpkg/Catch2, tiny generated frontend, block-parameter SSA IR, i64 interpreter, register-IR backend, internal x64 assembler, linear scan register allocation, fib/gcd demo, and architecture-heavy documentation strategy.
+The update should capture C++26 modules, Clang/CMake/Ninja, Nix/Catch2, tiny generated frontend, block-parameter SSA IR, i64 interpreter, register-IR backend, internal x64 assembler, linear scan register allocation, fib/gcd demo, and architecture-heavy documentation strategy.
 
 ## Resolution
 

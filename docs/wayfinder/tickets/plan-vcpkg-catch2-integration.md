@@ -4,6 +4,7 @@ parent: ../mljit-design-map.md
 labels:
   - wayfinder:task
 status: closed
+resolution: Superseded — Nix now supplies all dependencies; vcpkg has been dropped.
 assignee: workflow-manager
 blocked_by: []
 ---

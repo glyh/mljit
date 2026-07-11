@@ -24,18 +24,18 @@ Avoid by default:
 
 - LLVM as a backend dependency;
 - asmjit or external JIT abstractions;
-- fmt/spdlog/Quill/Boost.Log as core logging infrastructure;
-- Boost-heavy architecture;
+- fmt/spdlog/Quill as core logging infrastructure;
+- broad framework-heavy architecture;
 - parser-combinator libraries for the frontend.
 
 ## Acquisition
 
-Use vcpkg manifest mode for third-party dependencies when feasible.
+Use Nix flakes for all dependencies (toolchain, build tools, libraries).
 
 Dependency checks should answer:
 
 1. Is this dependency isolated to tests/tooling, or does it enter compiler core/runtime?
-2. Is it available through vcpkg?
+2. Is it available through Nix/nixpkgs?
 3. Does it preserve C++ modules/CMake simplicity?
 4. Is it cheaper and safer than a small local implementation?
 5. Does it improve the project signal, or obscure the compiler/JIT work behind a library?
@@ -49,7 +49,7 @@ Status: accepted.
 Scope:
 
 - test-only;
-- acquired through vcpkg manifest mode;
+- acquired through Nix flake;
 - integrated through CMake/CTest;
 - must not leak into `mljit-lib` or compiler core APIs.
 
