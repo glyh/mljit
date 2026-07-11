@@ -24,7 +24,7 @@ Standing preferences and constraints for this effort:
 - Target any x86-64 Linux environment; do not initially target Windows, macOS, or non-x86 JIT backends.
 - Use vcpkg manifest mode for portable dependency acquisition.
 - Use Catch2 with CTest/CMake for tests.
-- Tooling dependencies are allowed; compiler core/runtime should avoid LLVM, asmjit, fmt/spdlog, Boost-heavy architecture, parser-combinator libraries, and external JIT abstractions unless strongly justified.
+- Keep compiler core/runtime dependency-light; dependency decisions live in [Dependency Policy](../dependency-policy.md), while implementation conventions live in [Coding Standard](../coding-standard.md).
 - Use a tiny generated frontend plus direct IR construction in tests; frontend should not block IR/backend work.
 - JIT capstone is a register-IR backend: block-parameter SSA → register allocation → x86-64 emission.
 - Start with first-order functions only; add closures after the register backend works.
@@ -39,6 +39,7 @@ Standing preferences and constraints for this effort:
 - Build a project-owned x64 assembler layer; do not depend on asmjit.
 - v1 register allocation should be linear scan with spill support.
 - Expose stable textual phase dumps from day one.
+- Use structured compiler/JIT phase tracing for observability; concrete event/API details live in [Design Structured Trace Events](tickets/design-structured-trace-events.md).
 
 ## Decisions so far
 
@@ -46,12 +47,14 @@ Standing preferences and constraints for this effort:
 
 - [Update PROJECT.md for the New Design Direction](tickets/update-project-spec-for-new-design.md) — replaced stale `PROJECT.md` with a short backend-first `README.md` that states current status and links to the design map.
 - [Plan vcpkg and Catch2 Integration](tickets/plan-vcpkg-catch2-integration.md) — added `vcpkg.json` manifest, wired Catch2 v3 + CTest discovery, and verified with 3/3 passing smoke tests.
+- [Design the Block-Parameter SSA IR Data Model](tickets/design-block-parameter-ssa-ir.md) — settled the Milestone 1 IR package boundary: minimal module-owned functions, function-local block/value/instruction IDs, entry-block params, `i64`/`i1`, separate terminators, variant payloads, builder-controlled construction, and first dump tests for `add1` plus block-param `abs`.
 
 ## Fog
 
 - Parser generator final choice is still pending research. The current leaning is Bison C++ skeleton plus re2c, but this should be decided in [Choose the Generated Frontend Stack](tickets/choose-generated-frontend-stack.md).
 - The exact shape of the mutable/ref-like backend layer is intentionally deferred until SSA IR and the first backend lowering artifacts exist.
-- Machine IR persistence policy is decided: it should be transient per-function backend state. Its concrete instruction/value/block shape should be specified in [Design the Transient Machine IR Boundary](tickets/design-transient-machine-ir-boundary.md) after the SSA IR data model is sketched.
+- Machine IR persistence policy is decided: it should be transient per-function backend state. Its concrete instruction/value/block shape should be specified in [Design the Transient Machine IR Boundary](tickets/design-transient-machine-ir-boundary.md) after the first SSA IR implementation slice lands.
+- Structured tracing policy is decided at a high level. Its exact event schema, sink API, and CLI/test integration should be specified in [Design Structured Trace Events](tickets/design-structured-trace-events.md) after the first verifier/interpreter phases exist; dependency decisions belong in [Dependency Policy](../dependency-policy.md) and implementation conventions belong in [Coding Standard](../coding-standard.md).
 - Runtime representation beyond i64 is deferred: closures, heap objects, ADTs, tuples, strings, tagging, and GC/refcounting should only graduate after the i64 register backend is demonstrably working.
 - Benchmark presentation details are deferred until fib/gcd run under both interpreter and native backend.
 - CI/vcpkg caching strategy is deferred until the first dependency manifest lands and the Catch2 test target exists.
