@@ -51,6 +51,7 @@ Standing preferences and constraints for this effort:
 - [Define the SSA Verifier Rules](tickets/define-ssa-verifier-rules.md) — settled `mljit.ir.verifier`: accumulate deterministic typed `VerifyError`s, reject unreachable blocks, use private Cooper-Harvey-Kennedy dominance, and cover valid IR plus one negative test per major invariant with test-only unsafe mutation helpers.
 - [Design the i64 SSA Interpreter](tickets/design-i64-ssa-interpreter.md) — settled `mljit.ir.runtime`: reusable `runtime::Interpreter` over a verified immutable module view, explicit continuation stack with `return_target`, dense word environments, checked arithmetic/division, `idiv`/`irem` full vertical slice, and fib/gcd runtime acceptance tests.
 - [Choose the Frontend Stack](tickets/choose-generated-frontend-stack.md) — settled on ANTLR4 (grammar → generated lexer/parser/visitor), isolated to `mljit.frontend` module via `src/frontend.cppm`; public API returns project-owned `ir::Module`; see `docs/dependency-policy.md` for scoping.
+- [Design the Project-Owned x64 Assembler Layer](tickets/design-x64-assembler-layer.md) — settled `mljit.x64` module (`src/x64.cppm`), namespace `mljit::x64`: Gpr enum, Mem operand, Label/fixup system, RAII ExecBuffer (mmap + `no_sanitize("function")`), assembler surface for i64 mov/add/sub/imul/idiv/cqo/cmp/setCC/movzx/push/pop/jmp/jCC/call/ret, and 42 golden-byte + exec smoke tests.
 
 ## Fog
 - The exact shape of the mutable/ref-like backend layer is intentionally deferred until SSA IR and the first backend lowering artifacts exist.

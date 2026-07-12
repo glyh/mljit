@@ -3,7 +3,7 @@ title: Design the Project-Owned x64 Assembler Layer
 parent: ../mljit-design-map.md
 labels:
   - wayfinder:prototype
-status: open
+status: closed
 assignee:
 blocked_by:
   - design-block-parameter-ssa-ir.md
