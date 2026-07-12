@@ -12,6 +12,7 @@ target_sources(mljit-lib
         ir_verifier.cppm
         ir_runtime.cppm
         frontend.cppm
+        x64.cppm
 )
 
 target_compile_features(mljit-lib PUBLIC cxx_std_26)
