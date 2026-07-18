@@ -2,7 +2,7 @@
 find_package(Catch2 3 REQUIRED)
 
 # ── Test executable ──────────────────────────────────────────
-add_executable(mljit-tests test_ir.cpp test_ir_verify.cpp test_ir_runtime.cpp test_frontend.cpp test_x64.cpp test_regalloc.cpp)
+add_executable(mljit-tests test_ir.cpp test_ir_verify.cpp test_ir_runtime.cpp test_frontend.cpp test_x64.cpp test_regalloc.cpp test_codegen.cpp)
 
 target_link_libraries(mljit-tests PRIVATE
   mljit::lib

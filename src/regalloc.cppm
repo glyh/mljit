@@ -153,6 +153,12 @@ struct Resolution {
 [[nodiscard]] auto dump_resolution(ir::Function const& fn,
                                    Resolution const& res) -> std::string;
 
+// Sequentialize a parallel assignment (dst_i <- src_i, dst distinct) into
+// ordered moves, breaking register cycles with xchg.  Exposed for emission,
+// e.g. moving incoming ABI argument registers into their allocated locations.
+[[nodiscard]] auto sequentialize_parallel_moves(
+    std::vector<std::pair<Location, Location>> parallel) -> std::vector<Move>;
+
 }  // namespace mljit::regalloc
 
 // ═══════════════════════════════════════════════════════════════
@@ -729,6 +735,11 @@ auto resolve(ir::Function const& fn, Numbering const& n, Allocation const& alloc
     }
   }
   return res;
+}
+
+auto sequentialize_parallel_moves(std::vector<std::pair<Location, Location>> parallel)
+    -> std::vector<Move> {
+  return sequentialize(std::move(parallel));
 }
 
 auto dump_resolution(ir::Function const& fn, Resolution const& res) -> std::string {
