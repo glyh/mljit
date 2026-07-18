@@ -44,6 +44,24 @@ TEST_CASE("mov_rr mixed extended", "[x64][mov]") {
 }
 
 // ================================================================
+//  xchg_rr
+// ================================================================
+
+TEST_CASE("xchg_rr base registers", "[x64][xchg]") {
+  Assembler a;
+  a.xchg_rr(Gpr::rax, Gpr::rcx);   // swap rax, rcx
+  // REX.W + 87 + ModRM reg=rax(0) rm=rcx(1) = C1
+  CHECK(a.bytes() == vec({0x48, 0x87, 0xC1}));
+}
+
+TEST_CASE("xchg_rr extended registers", "[x64][xchg]") {
+  Assembler a;
+  a.xchg_rr(Gpr::r8, Gpr::r15);    // swap r8, r15
+  // REX.W + R(r8) + B(r15) = 0x4D, 0x87, ModRM reg=r8(0) rm=r15(7) = C7
+  CHECK(a.bytes() == vec({0x4D, 0x87, 0xC7}));
+}
+
+// ================================================================
 //  mov_ri
 // ================================================================
 

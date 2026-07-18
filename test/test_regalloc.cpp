@@ -135,6 +135,51 @@ TEST_CASE("intervals: diamond with a lifetime hole", "[regalloc][intervals]") {
   CHECK(regalloc::dump_intervals(iv) == expected_iv);
 }
 
+// A loop whose back edge swaps its two parameters, forcing a register cycle
+// (broken with xchg) on a critical edge (loop forks, loop merges -> split).
+//
+//   ^entry(x, y):  jump ^loop(x, y)
+//   ^loop(a, b):   z = 0; c = a == z; branch c, ^exit(a), ^loop(b, a)
+//   ^exit(r):      ret r
+TEST_CASE("resolution: swap cycle on a critical edge", "[regalloc][resolution]") {
+  ir::ModuleBuilder mb;
+  auto fid = mb.create_function({ir::Type::i64, ir::Type::i64}, ir::Type::i64, "swap_loop");
+  auto fb  = mb.function_builder(fid);
+
+  auto entry = fb.entry_block();
+  auto x = fb.param_id(entry, 0);
+  auto y = fb.param_id(entry, 1);
+  auto loop = fb.append_block({ir::Type::i64, ir::Type::i64}, "loop");
+  auto exit = fb.append_block({ir::Type::i64}, "exit");
+
+  fb.jump(entry, loop, {x, y});
+
+  auto a = fb.param_id(loop, 0);
+  auto b = fb.param_id(loop, 1);
+  auto z = fb.const_i64(loop, 0, "z");
+  auto c = fb.icmp(loop, ir::IcmpCond::eq, a, z, "c");
+  fb.branch(loop, c, exit, {a}, loop, {b, a});   // false edge swaps (a,b)->(b,a)
+
+  auto r = fb.param_id(exit, 0);
+  fb.ret(exit, r);
+
+  auto mod = mb.finish();
+  auto const& fn = mod.functions[fid.value];
+
+  auto n     = regalloc::compute_numbering(fn);
+  auto iv    = regalloc::build_intervals(fn, n);
+  auto alloc = regalloc::allocate(fn, n, iv);
+  auto reso  = regalloc::resolve(fn, n, alloc);
+
+  // loop->loop is critical (loop forks at the branch and merges from entry +
+  // itself), so the edge is split; the (a,b)<-(b,a) swap is one register cycle
+  // broken with a single xchg.
+  std::string const expected_res =
+    "edge ^loop -> ^loop (split):\n"
+    "  xchg rcx, rsi\n";
+  CHECK(regalloc::dump_resolution(fn, reso) == expected_res);
+}
+
 // gcd(a, b): an iterative loop with a back-edge.
 //
 //   ^entry(a, b):   jump ^loop(a, b)
@@ -237,4 +282,14 @@ TEST_CASE("numbering: gcd (loop / back-edge)", "[regalloc][numbering]") {
       CHECK(loc->reg != x64::Gpr::rdx);
     }
   }
+
+  // Resolution: the only real moves are on the body->loop back edge, threading
+  // (a, b) <- (b, a%b): a1(rcx) <- b2(rsi), b1(rsi) <- r(rdi). Emitted in
+  // dependency order so rcx is read before rsi is overwritten.
+  auto reso = regalloc::resolve(fn, n, alloc);
+  std::string const expected_res =
+    "edge ^body -> ^loop:\n"
+    "  mov rcx, rsi\n"
+    "  mov rsi, rdi\n";
+  CHECK(regalloc::dump_resolution(fn, reso) == expected_res);
 }

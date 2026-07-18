@@ -110,6 +110,7 @@ public:
   void mov_mr(Mem dst, Gpr src);           // [dst] = src
   void mov_rm(Gpr dst, Mem src);           // dst = [src]
   void movzx_rr(Gpr dst, Gpr src);         // dst = zero-extend(src.byte)
+  void xchg_rr(Gpr a, Gpr b);              // swap a, b (register cycle-breaking)
 
   // ── Arithmetic ──────────────────────────────────────────────
   void add_rr(Gpr dst, Gpr src);
@@ -304,6 +305,15 @@ inline void Assembler::movzx_rr(Gpr dst, Gpr src) {
   emit_u8(0x0F);
   emit_u8(0xB6);
   modrm_reg(low3(dst), low3(src));
+}
+
+inline void Assembler::xchg_rr(Gpr a, Gpr b) {
+  assert(!finalized_);
+  // REX.W + 87 /r  —  reg=a, rm=b (xchg is symmetric).  Register-register
+  // form does NOT assert a LOCK prefix, so it is a cheap ~3-cycle swap.
+  rex(true, is_ext(a), false, is_ext(b));
+  emit_u8(0x87);
+  modrm_reg(low3(a), low3(b));
 }
 
 // ── Arithmetic ────────────────────────────────────────────────

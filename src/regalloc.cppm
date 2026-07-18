@@ -12,6 +12,7 @@ module;
 #include <array>
 #include <optional>
 #include <cassert>
+#include <utility>
 
 export module mljit.regalloc;
 
@@ -107,6 +108,8 @@ struct Location {
   LocKind    kind = LocKind::Reg;
   x64::Gpr   reg  = x64::Gpr::rax;  // valid when kind == Reg
   std::uint32_t slot = 0;           // valid when kind == Spill
+
+  auto operator==(Location const&) const -> bool = default;
 };
 
 // The allocator's output side-table: a location per value, SSA left untouched.
@@ -118,6 +121,37 @@ struct Allocation {
 [[nodiscard]] auto allocate(ir::Function const& fn, Numbering const& n,
                             IntervalSet const& intervals) -> Allocation;
 [[nodiscard]] auto dump_allocation(Allocation const& alloc) -> std::string;
+
+// ── Move resolution ───────────────────────────────────────────
+//
+// Block-parameter argument passing (and, later, split reconciliation) turns
+// into concrete moves on control-flow edges.  Passing args to a successor is a
+// *parallel* assignment `param_i <- arg_i`; it is sequentialized so no
+// destination is clobbered before it is read, and register cycles are broken
+// with `xchg` (no scratch register reserved).
+enum class MoveOp : std::uint8_t { Mov, Xchg };
+
+struct Move {
+  MoveOp   op;
+  Location dst;   // Mov: written; Xchg: one operand
+  Location src;   // Mov: read;    Xchg: other operand
+};
+
+struct EdgeMoves {
+  ir::BlockId       from;
+  ir::BlockId       to;
+  bool              split = false;  // critical edge -> synthetic resolution block
+  std::vector<Move> moves;
+};
+
+struct Resolution {
+  std::vector<EdgeMoves> edges;  // only edges that need at least one move
+};
+
+[[nodiscard]] auto resolve(ir::Function const& fn, Numbering const& n,
+                           Allocation const& alloc) -> Resolution;
+[[nodiscard]] auto dump_resolution(ir::Function const& fn,
+                                   Resolution const& res) -> std::string;
 
 }  // namespace mljit::regalloc
 
@@ -588,6 +622,126 @@ auto dump_allocation(Allocation const& alloc) -> std::string {
       out += std::format("v{}: {}\n", i, reg_name(loc->reg));
     else
       out += std::format("v{}: [slot {}]\n", i, loc->slot);
+  }
+  return out;
+}
+
+// ── Move resolution ───────────────────────────────────────────
+
+namespace {
+
+// (successor, block args) pairs for a terminator, in a stable order.
+auto terminator_edges(ir::TermPayload const& t)
+    -> std::vector<std::pair<ir::BlockId, std::vector<ir::ValueId>>> {
+  using Edges = std::vector<std::pair<ir::BlockId, std::vector<ir::ValueId>>>;
+  return std::visit(ir::overload{
+    [](ir::Ret const&) { return Edges{}; },
+    [](ir::Jump const& j) { return Edges{{j.target, j.args}}; },
+    [](ir::Branch const& b) {
+      return Edges{{b.true_block, b.true_args}, {b.false_block, b.false_args}};
+    },
+  }, t);
+}
+
+// Sequentialize a parallel move (dst_i <- src_i, dst_i all distinct) so that no
+// destination is written before it is read.  A move whose dst nothing else
+// reads is emitted immediately; when only cycles remain, `xchg` breaks one and
+// the remaining reads of the swapped-out location are redirected.
+auto sequentialize(std::vector<std::pair<Location, Location>> pm) -> std::vector<Move> {
+  auto drop_noops = [](std::vector<std::pair<Location, Location>>& v) {
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [](auto const& m) { return m.first == m.second; }),
+            v.end());
+  };
+  drop_noops(pm);
+
+  std::vector<Move> out;
+  while (!pm.empty()) {
+    auto is_read = [&](Location loc) {
+      for (auto const& m : pm) if (m.second == loc) return true;
+      return false;
+    };
+
+    bool emitted = false;
+    for (std::size_t i = 0; i < pm.size(); ++i) {
+      if (!is_read(pm[i].first)) {
+        out.push_back(Move{MoveOp::Mov, pm[i].first, pm[i].second});
+        pm.erase(pm.begin() + static_cast<std::ptrdiff_t>(i));
+        emitted = true;
+        break;
+      }
+    }
+    if (emitted) continue;
+
+    // Only cycles remain: break one with xchg.
+    Location const d = pm.front().first;
+    Location const s = pm.front().second;
+    out.push_back(Move{MoveOp::Xchg, d, s});
+    pm.erase(pm.begin());
+    for (auto& m : pm) if (m.second == d) m.second = s;  // d's old value now in s
+    drop_noops(pm);
+  }
+  return out;
+}
+
+auto loc_str(Location l) -> std::string {
+  if (l.kind == LocKind::Reg) return std::string(reg_name(l.reg));
+  return std::format("[slot {}]", l.slot);
+}
+
+}  // namespace
+
+auto resolve(ir::Function const& fn, Numbering const& n, Allocation const& alloc)
+    -> Resolution {
+  auto const nblocks = fn.blocks.size();
+
+  // Predecessor counts, for critical-edge detection.
+  std::vector<int> pred_count(nblocks, 0);
+  for (auto const& blk : fn.blocks)
+    if (blk.terminator)
+      for (auto s : successors(blk)) ++pred_count[s.value];
+
+  auto loc_of = [&](ir::ValueId v) -> Location {
+    auto const& l = alloc.value_locs[v.value];
+    assert(l && "value has no location");
+    return *l;
+  };
+
+  Resolution res;
+  for (auto bid : n.order) {
+    auto const& blk = fn.blocks[bid.value];
+    if (!blk.terminator) continue;
+
+    auto const edges = terminator_edges(*blk.terminator);
+    std::size_t const succ_count = edges.size();
+
+    for (auto const& [succ, args] : edges) {
+      auto const& sblk = fn.blocks[succ.value];
+      std::vector<std::pair<Location, Location>> pm;
+      for (std::size_t i = 0; i < args.size(); ++i)
+        pm.emplace_back(loc_of(sblk.params[i].id), loc_of(args[i]));
+
+      auto moves = sequentialize(std::move(pm));
+      if (moves.empty()) continue;
+
+      bool const split = succ_count > 1 && pred_count[succ.value] > 1;
+      res.edges.push_back(EdgeMoves{bid, succ, split, std::move(moves)});
+    }
+  }
+  return res;
+}
+
+auto dump_resolution(ir::Function const& fn, Resolution const& res) -> std::string {
+  std::string out;
+  for (auto const& e : res.edges) {
+    out += std::format("edge ^{} -> ^{}{}:\n",
+                       block_label(fn.blocks[e.from.value], e.from),
+                       block_label(fn.blocks[e.to.value], e.to),
+                       e.split ? " (split)" : "");
+    for (auto const& m : e.moves) {
+      char const* op = (m.op == MoveOp::Mov) ? "mov" : "xchg";
+      out += std::format("  {} {}, {}\n", op, loc_str(m.dst), loc_str(m.src));
+    }
   }
   return out;
 }
