@@ -57,10 +57,18 @@ is that emission always emits those boundary moves rather than the allocator occ
 placing a value directly in the ABI register. Re-introducing arg/return pinning to elide
 redundant boundary moves is a documented later refinement.
 
-### Spilling deferred; split-vs-whole-interval still open
+### Spilling — allocator side done (whole-interval Belady); emission pending
 
-Slices 1–3 implement the no-spill allocator; the scan asserts if register pressure exceeds the
-14 allocatable registers (fib/gcd never reach it). Slice 4 will implement spilling, at which
-point the design's **spill-by-split** must be weighed against a simpler **whole-interval Belady
-spill** (correct, less code, a code-quality step back in the family already parked in the map
-Fog). Decision to be made when the slice is picked up.
+The allocator now spills: when no register is free for a whole interval it evicts, by Belady
+(furthest next use), a value in a register not pinned by a fixed interval — or spills the
+current value if its own next use is furthest. One 8-byte slot per spilled value. Chosen over
+the design's **spill-by-split** for v1 simplicity (recorded in the map Fog); split remains the
+eventual quality refinement. Validated structurally via a `make_pressure_fn(N)` generator and
+reusable invariants (all live values located, no overlapping values share a register, distinct
+slots).
+
+**Still pending:** *emitting* spilled values. `mljit.codegen` still asserts on a spilled
+`Location` (fib/gcd never produce one). Reloading a spilled operand at its use needs a register,
+which the register-only ALU cannot borrow for free — so emission-of-spills forces a choice
+between **reserving a scratch register** (→ 13 allocatable) and **spill-by-split** (reintegrates
+the value into a register at each use). That decision belongs to the emission-of-spills step.
