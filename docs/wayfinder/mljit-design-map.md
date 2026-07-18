@@ -45,6 +45,15 @@ Standing preferences and constraints for this effort:
 
 <!-- Closed tickets will be linked here as the map is worked. Charting decisions above are standing notes; future decision details live in their tickets. -->
 
+<!-- MILESTONE (2026-07-18): the v1 native x86-64 backend runs end to end. SSA ->
+numbering -> live intervals -> linear-scan allocation -> move resolution -> direct
+x64 emission -> mmap'd executable. Both benchmark-demo functions compile to native
+machine code and match the SSA interpreter across inputs: iterative gcd (loop,
+block-parameter moves, irem) and recursive fib (self-calls, callee-saved registers,
+stack alignment). Everything project-owned — no LLVM, no asmjit. Remaining v1 gaps:
+register spilling (allocator asserts past 14 live), cross-function calls, and the
+i1-as-value / isub-scratch emission refinements. -->
+
 - [Update PROJECT.md for the New Design Direction](tickets/update-project-spec-for-new-design.md) — replaced stale `PROJECT.md` with a short backend-first `README.md` that states current status and links to the design map.
 - [Plan vcpkg and Catch2 Integration](tickets/plan-vcpkg-catch2-integration.md) — added `vcpkg.json` manifest, wired Catch2 v3 + CTest discovery, and verified with 3/3 passing smoke tests. **Superseded:** Nix now supplies all dependencies; vcpkg has been dropped.
 - [Design the Block-Parameter SSA IR Data Model](tickets/design-block-parameter-ssa-ir.md) — settled the Milestone 1 IR package boundary: minimal module-owned functions, function-local block/value/instruction IDs, entry-block params, `i64`/`i1`, separate terminators, variant payloads, builder-controlled construction, and first dump tests for `add1` plus block-param `abs`.
