@@ -583,39 +583,84 @@ auto allocate(ir::Function const& fn, Numbering const& n,
 
   // Intervals already given a register, checked for conflicts via intersection.
   std::vector<std::pair<LiveInterval const*, x64::Gpr>> assigned;
+  std::uint32_t next_slot = 0;
 
   constexpr Pos kInf = std::numeric_limits<Pos>::max();
 
+  auto next_use_from = [](LiveInterval const& iv, Pos pos) -> Pos {
+    for (Pos u : iv.uses) if (u >= pos) return u;
+    return kInf;
+  };
+
   for (auto const* cur : work) {
-    Pos const cur_end = cur->ranges.back().to;
+    Pos const cur_start = cur->ranges.front().from;
+    Pos const cur_end   = cur->ranges.back().to;
 
-    std::array<Pos, kAllocatable.size()> free_until;
-    free_until.fill(kInf);
-
-    auto limit_reg = [&](x64::Gpr reg, Pos until) {
-      auto const k = pool_index(reg);
-      if (k < free_until.size()) free_until[k] = std::min(free_until[k], until);
-    };
-
+    // How far each register is free for `cur`, split by cause: value intervals
+    // (spillable) vs. fixed intervals (hard constraints — idiv/call clobbers).
+    std::array<Pos, kAllocatable.size()> value_free;  value_free.fill(kInf);
+    std::array<Pos, kAllocatable.size()> fixed_free;  fixed_free.fill(kInf);
     for (auto const& [iv, reg] : assigned)
-      if (auto q = first_intersection(iv->ranges, cur->ranges)) limit_reg(reg, *q);
+      if (auto q = first_intersection(iv->ranges, cur->ranges)) {
+        auto const k = pool_index(reg);
+        if (k < value_free.size()) value_free[k] = std::min(value_free[k], *q);
+      }
     for (auto const& fx : fixed)
-      if (auto q = first_intersection(fx.ranges, cur->ranges)) limit_reg(fx.reg, *q);
+      if (auto q = first_intersection(fx.ranges, cur->ranges)) {
+        auto const k = pool_index(fx.reg);
+        if (k < fixed_free.size()) fixed_free[k] = std::min(fixed_free[k], *q);
+      }
 
-    // First-fit in pool order among registers free for the whole interval.
+    // First-fit: a register free for the whole interval from both causes.
     std::size_t chosen = kAllocatable.size();
-    for (std::size_t k = 0; k < kAllocatable.size(); ++k) {
-      if (free_until[k] >= cur_end) { chosen = k; break; }
-    }
-    // Spilling (register pressure > 14) is the next slice; low-pressure
-    // functions like fib/gcd never reach it.
-    assert(chosen < kAllocatable.size() && "register spilling not yet implemented");
+    for (std::size_t k = 0; k < kAllocatable.size(); ++k)
+      if (value_free[k] >= cur_end && fixed_free[k] >= cur_end) { chosen = k; break; }
 
-    x64::Gpr const reg = kAllocatable[chosen];
-    alloc.value_locs[cur->value.value] = Location{LocKind::Reg, reg, 0};
-    assigned.emplace_back(cur, reg);
+    if (chosen < kAllocatable.size()) {
+      x64::Gpr const reg = kAllocatable[chosen];
+      alloc.value_locs[cur->value.value] = Location{LocKind::Reg, reg, 0};
+      assigned.emplace_back(cur, reg);
+      continue;
+    }
+
+    // No register free -> spill.  Belady: among registers not blocked by a
+    // fixed interval, pick the one whose blocking value is used furthest out.
+    Pos const cur_next = next_use_from(*cur, cur_start);
+    std::size_t victim_k = kAllocatable.size();
+    Pos victim_next = 0;
+    for (std::size_t k = 0; k < kAllocatable.size(); ++k) {
+      if (fixed_free[k] < cur_end) continue;   // fixed constraint — cannot evict
+      if (value_free[k] >= cur_end) continue;  // not actually blocked (shouldn't fit above, but guard)
+      Pos furthest = 0;
+      for (auto const& [iv, reg] : assigned)
+        if (pool_index(reg) == k && first_intersection(iv->ranges, cur->ranges))
+          furthest = std::max(furthest, next_use_from(*iv, cur_start));
+      if (victim_k == kAllocatable.size() || furthest > victim_next) {
+        victim_next = furthest;
+        victim_k = k;
+      }
+    }
+
+    if (victim_k == kAllocatable.size() || cur_next >= victim_next) {
+      // `cur` is used furthest out (or nothing evictable) -> spill `cur`.
+      alloc.value_locs[cur->value.value] = Location{LocKind::Spill, x64::Gpr::rax, next_slot++};
+    } else {
+      // Evict the conflicting value(s) in the victim register to slots, then
+      // give that register to `cur`.
+      x64::Gpr const reg = kAllocatable[victim_k];
+      for (auto const& [iv, r] : assigned)
+        if (r == reg && first_intersection(iv->ranges, cur->ranges))
+          alloc.value_locs[iv->value.value] = Location{LocKind::Spill, x64::Gpr::rax, next_slot++};
+      std::erase_if(assigned, [&](auto const& p) {
+        auto const& loc = alloc.value_locs[p.first->value.value];
+        return p.second == reg && loc && loc->kind == LocKind::Spill;
+      });
+      alloc.value_locs[cur->value.value] = Location{LocKind::Reg, reg, 0};
+      assigned.emplace_back(cur, reg);
+    }
   }
 
+  alloc.num_spill_slots = next_slot;
   return alloc;
 }
 

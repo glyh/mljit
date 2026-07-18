@@ -4,8 +4,68 @@ import mljit.x64;
 
 #include <catch2/catch_test_macros.hpp>
 #include <string>
+#include <vector>
+#include <algorithm>
+#include <set>
 
 using namespace mljit;
+
+// ── Pressure test helpers ─────────────────────────────────────
+
+// A function with N simultaneously-live values (N constants, all live until a
+// final sum), forcing spills once N exceeds the 14-register file.
+static auto make_pressure_fn(int count) -> ir::Module {
+  ir::ModuleBuilder mb;
+  auto fid = mb.create_function({ir::Type::i64}, ir::Type::i64, "pressure");
+  auto fb  = mb.function_builder(fid);
+  auto entry = fb.entry_block();
+  std::vector<ir::ValueId> vs;
+  for (std::size_t i = 0; i < static_cast<std::size_t>(count); ++i)
+    vs.push_back(fb.const_i64(entry, static_cast<std::int64_t>(i) + 1,
+                              "v" + std::to_string(i)));
+  ir::ValueId acc = vs[0];
+  for (std::size_t i = 1; i < vs.size(); ++i) acc = fb.iadd(entry, acc, vs[i]);
+  fb.ret(entry, acc);
+  return mb.finish();
+}
+
+static auto ranges_overlap(regalloc::LiveInterval const& a,
+                           regalloc::LiveInterval const& b) -> bool {
+  for (auto ra : a.ranges)
+    for (auto rb : b.ranges)
+      if (std::max(ra.from, rb.from) < std::min(ra.to, rb.to)) return true;
+  return false;
+}
+
+// Structural correctness of an allocation, independent of execution.
+static void check_invariants(regalloc::IntervalSet const& iv,
+                             regalloc::Allocation const& alloc) {
+  // (1) Every live value has a location.
+  for (auto const& interval : iv.intervals)
+    if (!interval.ranges.empty())
+      CHECK(alloc.value_locs[interval.value.value].has_value());
+
+  // (2) No two overlapping intervals share a register.
+  for (std::size_t i = 0; i < iv.intervals.size(); ++i) {
+    auto const& a = iv.intervals[i];
+    auto const& la = alloc.value_locs[a.value.value];
+    if (a.ranges.empty() || !la || la->kind != regalloc::LocKind::Reg) continue;
+    for (std::size_t j = i + 1; j < iv.intervals.size(); ++j) {
+      auto const& b = iv.intervals[j];
+      auto const& lb = alloc.value_locs[b.value.value];
+      if (b.ranges.empty() || !lb || lb->kind != regalloc::LocKind::Reg) continue;
+      if (la->reg == lb->reg) CHECK_FALSE(ranges_overlap(a, b));
+    }
+  }
+
+  // (3) Spilled values get distinct slots, each within the frame.
+  std::set<std::uint32_t> slots;
+  for (auto const& loc : alloc.value_locs)
+    if (loc && loc->kind == regalloc::LocKind::Spill) {
+      CHECK(loc->slot < alloc.num_spill_slots);
+      CHECK(slots.insert(loc->slot).second);   // no duplicate slot
+    }
+}
 
 // abs(x): a branch/merge with block parameters.
 //
@@ -292,4 +352,25 @@ TEST_CASE("numbering: gcd (loop / back-edge)", "[regalloc][numbering]") {
     "  mov rcx, rsi\n"
     "  mov rsi, rdi\n";
   CHECK(regalloc::dump_resolution(fn, reso) == expected_res);
+}
+
+// Register pressure: below the 14-register file everyone gets a register;
+// above it, the allocator spills — and every allocation stays structurally
+// valid (no overlapping values share a register, spill slots are distinct).
+TEST_CASE("allocation: register pressure and spilling", "[regalloc][pressure]") {
+  // Peak pressure is count+1: at the first reduction add, both operands are
+  // still live and the result is born while the other constants remain live.
+  // So the 14-register file is exceeded once count >= 14.
+  for (int count : {10, 13, 14, 15, 16, 20, 30, 40}) {
+    auto mod = make_pressure_fn(count);
+    auto const& fn = mod.functions[0];
+    auto n     = regalloc::compute_numbering(fn);
+    auto iv    = regalloc::build_intervals(fn, n);
+    auto alloc = regalloc::allocate(fn, n, iv);
+
+    check_invariants(iv, alloc);
+
+    if (count <= 13) CHECK(alloc.num_spill_slots == 0);
+    else             CHECK(alloc.num_spill_slots > 0);
+  }
 }
