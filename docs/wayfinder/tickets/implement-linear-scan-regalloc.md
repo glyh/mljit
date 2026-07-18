@@ -67,8 +67,13 @@ eventual quality refinement. Validated structurally via a `make_pressure_fn(N)` 
 reusable invariants (all live values located, no overlapping values share a register, distinct
 slots).
 
-**Still pending:** *emitting* spilled values. `mljit.codegen` still asserts on a spilled
-`Location` (fib/gcd never produce one). Reloading a spilled operand at its use needs a register,
-which the register-only ALU cannot borrow for free — so emission-of-spills forces a choice
-between **reserving a scratch register** (→ 13 allocatable) and **spill-by-split** (reintegrates
-the value into a register at each use). That decision belongs to the emission-of-spills step.
+**Emission of spilled values — done.** Reloading a spilled operand needs a register the
+register-only ALU cannot borrow for free, so the choice was **reserve two scratch registers**
+(`r10`/`r11` → 12 allocatable) over spill-by-split. `mljit.codegen`'s `Emitter` resolves each
+operand through the allocation: register operands are used directly, spilled operands are
+reloaded into a scratch register, and spilled results are computed in a scratch and stored.
+This covers every op plus call args and block-parameter moves (reg↔slot, slot↔slot, and xchg).
+A frame-based prologue reserves the callee-saved saves plus spill slots with one 16-aligned
+`sub rsp`. Verified by a high-pressure differential test (up to 30 live values) matching the
+interpreter. **spill-by-split** remains the deferred quality refinement (map Fog): it would
+reclaim the two scratch registers and avoid whole-interval memory traffic.
