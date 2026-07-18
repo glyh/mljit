@@ -13,6 +13,7 @@ target_sources(mljit-lib
         ir_runtime.cppm
         frontend.cppm
         x64.cppm
+        regalloc.cppm
 )
 
 target_compile_features(mljit-lib PUBLIC cxx_std_26)
