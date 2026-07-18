@@ -57,6 +57,68 @@ TEST_CASE("numbering: abs (branch + merge)", "[regalloc][numbering]") {
     "  18: term ret\n";
 
   CHECK(dump == expected);
+
+  // Intervals: no holes — every value's uses are contiguous with its def.
+  auto iv = regalloc::build_intervals(fn, n);
+  std::string const expected_iv =
+    "v0: [0..7) uses 4,6\n"    // x: entry param, used at icmp(4) and branch(6)
+    "v1: [8..13) uses 12\n"    // neg param v, used at isub(12)
+    "v2: [16..19) uses 18\n"   // done param res, used at ret(18)
+    "v3: [2..5) uses 4\n"      // zero
+    "v4: [4..7) uses 6\n"      // isneg
+    "v5: [10..13) uses 12\n"   // z
+    "v6: [12..15) uses 14\n";  // r, used at jump(14)
+  CHECK(regalloc::dump_intervals(iv) == expected_iv);
+}
+
+// A diamond where a value is used on only one arm, producing a real lifetime
+// hole.
+//
+//   ^entry(p):  c = 7; zero = 0; cond = p == 0; branch cond, ^A, ^B
+//   ^A:         jump ^C(zero)        // uses zero
+//   ^B:         jump ^C(c)           // uses c
+//   ^C(m):      ret m
+//
+// Reverse-postorder lays the blocks out as entry, ^B, ^A, ^C (DFS finishes
+// ^A's subtree first, so it lands last after reversal).  So:
+//   - c is used only in ^B, which immediately follows entry -> contiguous.
+//   - zero is used at cond (in entry) and again in ^A (the last block), but is
+//     dead in ^B which sits between them -> a hole over ^B, [10..14).
+TEST_CASE("intervals: diamond with a lifetime hole", "[regalloc][intervals]") {
+  ir::ModuleBuilder mb;
+  auto fid = mb.create_function({ir::Type::i64}, ir::Type::i64, "diamond_hole");
+  auto fb  = mb.function_builder(fid);
+
+  auto entry = fb.entry_block();
+  auto p = fb.param_id(entry, 0);
+  auto ba = fb.append_block({}, "A");
+  auto bb = fb.append_block({}, "B");
+  auto bc = fb.append_block({ir::Type::i64}, "C");
+
+  auto c    = fb.const_i64(entry, 7, "c");
+  auto zero = fb.const_i64(entry, 0, "zero");
+  auto cond = fb.icmp(entry, ir::IcmpCond::eq, p, zero, "cond");
+  fb.branch(entry, cond, ba, {}, bb, {});
+
+  fb.jump(ba, bc, {zero});
+  fb.jump(bb, bc, {c});
+
+  auto m = fb.param_id(bc, 0);
+  fb.ret(bc, m);
+
+  auto mod = mb.finish();
+  auto const& fn = mod.functions[fid.value];
+
+  auto n  = regalloc::compute_numbering(fn);
+  auto iv = regalloc::build_intervals(fn, n);
+
+  std::string const expected_iv =
+    "v0: [0..7) uses 6\n"                // p
+    "v1: [18..21) uses 20\n"             // m: C param -> ret(20)
+    "v2: [2..13) uses 12\n"              // c: used only in ^B (first arm) -> contiguous
+    "v3: [4..10) [14..17) uses 6,16\n"   // zero: HOLE over ^B [10..14)
+    "v4: [6..9) uses 8\n";               // cond
+  CHECK(regalloc::dump_intervals(iv) == expected_iv);
 }
 
 // gcd(a, b): an iterative loop with a back-edge.
@@ -118,4 +180,21 @@ TEST_CASE("numbering: gcd (loop / back-edge)", "[regalloc][numbering]") {
     "  20: term ret\n";
 
   CHECK(dump == expected);
+
+  // Intervals: block-parameter SSA threads all loop-carried state through
+  // params, so nothing is live across the back edge and the loop-header
+  // extension is a no-op — no holes.
+  auto iv = regalloc::build_intervals(fn, n);
+  std::string const expected_iv =
+    "v0: [0..3) uses 2\n"       // a: entry param -> jump arg
+    "v1: [0..3) uses 2\n"       // b: entry param -> jump arg
+    "v2: [4..11) uses 10\n"     // a1: loop param -> branch arg
+    "v3: [4..11) uses 8,10\n"   // b1: loop param, used at icmp(8) and branch(10)
+    "v4: [12..15) uses 14\n"    // a2: body param -> irem(14)
+    "v5: [12..17) uses 14,16\n" // b2: body param, used at irem(14) and jump(16)
+    "v6: [18..21) uses 20\n"    // res: done param -> ret(20)
+    "v7: [6..9) uses 8\n"       // zero
+    "v8: [8..11) uses 10\n"     // is_zero
+    "v9: [14..17) uses 16\n";   // r: irem result -> jump arg
+  CHECK(regalloc::dump_intervals(iv) == expected_iv);
 }
