@@ -6,6 +6,7 @@ import mljit.x64;
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <vector>
+#include <string>
 
 using namespace mljit;
 
@@ -164,5 +165,37 @@ TEST_CASE("codegen: recursive fib matches interpreter", "[codegen]") {
     auto jit = buf.invoke<std::int64_t>(k);
     CHECK(jit == interp(mod, fid, {k}));
     CHECK(jit == expected[k]);
+  }
+}
+
+// High register pressure: compute N intermediates (x+1, x+2, ..., x+N), all
+// live at once, then sum them -> forces spilling well past the register file.
+// Result is sum_{i=1..N}(x + i) = N*x + N(N+1)/2.
+TEST_CASE("codegen: high pressure spills and runs", "[codegen][spill]") {
+  for (int N : {12, 15, 20, 30}) {
+    ir::ModuleBuilder mb;
+    auto fid = mb.create_function({ir::Type::i64}, ir::Type::i64, "pressure");
+    auto fb  = mb.function_builder(fid);
+    auto entry = fb.entry_block();
+    auto x = fb.param_id(entry, 0);
+
+    std::vector<ir::ValueId> vs;
+    for (int i = 0; i < N; ++i) {
+      auto c = fb.const_i64(entry, i + 1, "c" + std::to_string(i));
+      vs.push_back(fb.iadd(entry, x, c, "v" + std::to_string(i)));
+    }
+    ir::ValueId acc = vs[0];
+    for (std::size_t i = 1; i < vs.size(); ++i) acc = fb.iadd(entry, acc, vs[i]);
+    fb.ret(entry, acc);
+
+    auto mod = mb.finish();
+    auto buf = codegen::compile(mod, fid);
+
+    for (std::int64_t x_in : {0, 1, 7, -3}) {
+      auto jit = buf.invoke<std::int64_t>(x_in);
+      CHECK(jit == interp(mod, fid, {x_in}));
+      CHECK(jit == static_cast<std::int64_t>(N) * x_in +
+                   static_cast<std::int64_t>(N) * (N + 1) / 2);
+    }
   }
 }

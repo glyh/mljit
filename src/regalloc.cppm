@@ -85,13 +85,14 @@ struct IntervalSet {
 
 // ── Register model ────────────────────────────────────────────
 //
-// System V AMD64: rsp and rbp are reserved (stack + frame pointer), leaving
-// 14 allocatable general-purpose registers.  rax and rdx are placed last in
-// the allocation order so ordinary values tend to avoid them, keeping them
-// free for the instructions that force their use (idiv/irem, call results).
-inline constexpr std::array<x64::Gpr, 14> kAllocatable = {
+// System V AMD64: rsp and rbp are reserved (stack + frame pointer), and r10/r11
+// are reserved as emission scratch registers for reloading spilled operands,
+// leaving 12 allocatable general-purpose registers.  rax and rdx are placed
+// last in the allocation order so ordinary values tend to avoid them, keeping
+// them free for the instructions that force their use (idiv/irem, call results).
+inline constexpr std::array<x64::Gpr, 12> kAllocatable = {
   x64::Gpr::rcx, x64::Gpr::rsi, x64::Gpr::rdi,
-  x64::Gpr::r8,  x64::Gpr::r9,  x64::Gpr::r10, x64::Gpr::r11,
+  x64::Gpr::r8,  x64::Gpr::r9,
   x64::Gpr::rbx, x64::Gpr::r12, x64::Gpr::r13, x64::Gpr::r14, x64::Gpr::r15,
   x64::Gpr::rax, x64::Gpr::rdx,
 };

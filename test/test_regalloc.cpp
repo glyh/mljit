@@ -360,8 +360,9 @@ TEST_CASE("numbering: gcd (loop / back-edge)", "[regalloc][numbering]") {
 TEST_CASE("allocation: register pressure and spilling", "[regalloc][pressure]") {
   // Peak pressure is count+1: at the first reduction add, both operands are
   // still live and the result is born while the other constants remain live.
-  // So the 14-register file is exceeded once count >= 14.
-  for (int count : {10, 13, 14, 15, 16, 20, 30, 40}) {
+  // So the 12-register allocatable file (r10/r11 reserved as scratch) is
+  // exceeded once count >= 12.
+  for (int count : {8, 11, 12, 15, 16, 20, 30, 40}) {
     auto mod = make_pressure_fn(count);
     auto const& fn = mod.functions[0];
     auto n     = regalloc::compute_numbering(fn);
@@ -370,7 +371,7 @@ TEST_CASE("allocation: register pressure and spilling", "[regalloc][pressure]") 
 
     check_invariants(iv, alloc);
 
-    if (count <= 13) CHECK(alloc.num_spill_slots == 0);
+    if (count <= 11) CHECK(alloc.num_spill_slots == 0);
     else             CHECK(alloc.num_spill_slots > 0);
   }
 }
