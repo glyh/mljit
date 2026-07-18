@@ -120,6 +120,7 @@ public:
   void sub_ri(Gpr dst, std::int32_t imm);
   void cqo();                              // sign-extend rax → rdx:rax
   void idiv_r(Gpr src);                    // signed divide rdx:rax by src
+  void neg_r(Gpr dst);                     // dst = -dst (two's complement)
 
   // ── Comparison & setcc ──────────────────────────────────────
   void cmp_rr(Gpr lhs, Gpr rhs);
@@ -383,6 +384,14 @@ inline void Assembler::idiv_r(Gpr src) {
   rex(true, false, false, is_ext(src));
   emit_u8(0xF7);
   modrm_reg(7, low3(src));
+}
+
+inline void Assembler::neg_r(Gpr dst) {
+  assert(!finalized_);
+  // REX.W + F7 /3
+  rex(true, false, false, is_ext(dst));
+  emit_u8(0xF7);
+  modrm_reg(3, low3(dst));
 }
 
 // ── SetCC ─────────────────────────────────────────────────────

@@ -30,7 +30,7 @@ TEST_CASE("codegen: add1 matches interpreter", "[codegen]") {
   fb.ret(entry, r);
 
   auto mod = mb.finish();
-  auto buf = codegen::compile(mod.functions[fid.value]);
+  auto buf = codegen::compile(mod, fid);
 
   for (std::int64_t x_in : {0, 1, 5, -3, 100, -1}) {
     auto jit = buf.invoke<std::int64_t>(x_in);
@@ -51,7 +51,7 @@ TEST_CASE("codegen: x*x + x matches interpreter", "[codegen]") {
   fb.ret(entry, r);
 
   auto mod = mb.finish();
-  auto buf = codegen::compile(mod.functions[fid.value]);
+  auto buf = codegen::compile(mod, fid);
 
   for (std::int64_t x_in : {0, 1, 5, -3, 7, 12}) {
     auto jit = buf.invoke<std::int64_t>(x_in);
@@ -81,7 +81,7 @@ TEST_CASE("codegen: abs matches interpreter", "[codegen]") {
   fb.ret(done, res);
 
   auto mod = mb.finish();
-  auto buf = codegen::compile(mod.functions[fid.value]);
+  auto buf = codegen::compile(mod, fid);
 
   for (std::int64_t x_in : {0, 1, 5, -1, -5, 100, -100, 42, -42}) {
     auto jit = buf.invoke<std::int64_t>(x_in);
@@ -117,7 +117,7 @@ TEST_CASE("codegen: gcd matches interpreter", "[codegen]") {
   fb.ret(done, resv);
 
   auto mod = mb.finish();
-  auto buf = codegen::compile(mod.functions[fid.value]);
+  auto buf = codegen::compile(mod, fid);
 
   std::vector<std::pair<std::int64_t, std::int64_t>> cases = {
     {12, 8}, {48, 36}, {17, 5}, {100, 10}, {0, 5}, {7, 0}, {270, 192}, {13, 13},
@@ -125,5 +125,44 @@ TEST_CASE("codegen: gcd matches interpreter", "[codegen]") {
   for (auto [a_in, b_in] : cases) {
     auto jit = buf.invoke<std::int64_t>(a_in, b_in);
     CHECK(jit == interp(mod, fid, {a_in, b_in}));
+  }
+}
+
+// fib(n) = n < 2 ? n : fib(n-1) + fib(n-2)  -- recursive self-calls, values
+// live across calls (callee-saved), stack alignment, isub with neg.
+TEST_CASE("codegen: recursive fib matches interpreter", "[codegen]") {
+  ir::ModuleBuilder mb;
+  auto fid = mb.create_function({ir::Type::i64}, ir::Type::i64, "fib");
+  auto fb  = mb.function_builder(fid);
+
+  auto entry = fb.entry_block();
+  auto n    = fb.param_id(entry, 0);
+  auto base = fb.append_block({ir::Type::i64}, "base");
+  auto rec  = fb.append_block({ir::Type::i64}, "rec");
+  auto two   = fb.const_i64(entry, 2, "two");
+  auto small = fb.icmp(entry, ir::IcmpCond::slt, n, two, "small");
+  fb.branch(entry, small, base, {n}, rec, {n});
+
+  auto nb = fb.param_id(base, 0);
+  fb.ret(base, nb);
+
+  auto nr = fb.param_id(rec, 0);
+  auto one  = fb.const_i64(rec, 1, "one");
+  auto n1   = fb.isub(rec, nr, one, "n1");
+  auto f1   = fb.call(rec, fid, {n1}, "f1");
+  auto two2 = fb.const_i64(rec, 2, "two2");
+  auto n2   = fb.isub(rec, nr, two2, "n2");
+  auto f2   = fb.call(rec, fid, {n2}, "f2");
+  auto r    = fb.iadd(rec, f1, f2, "r");
+  fb.ret(rec, r);
+
+  auto mod = mb.finish();
+  auto buf = codegen::compile(mod, fid);
+
+  std::int64_t const expected[] = {0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144};
+  for (std::int64_t k = 0; k <= 12; ++k) {
+    auto jit = buf.invoke<std::int64_t>(k);
+    CHECK(jit == interp(mod, fid, {k}));
+    CHECK(jit == expected[k]);
   }
 }
