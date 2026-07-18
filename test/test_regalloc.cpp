@@ -1,5 +1,6 @@
 import mljit.ir;
 import mljit.regalloc;
+import mljit.x64;
 
 #include <catch2/catch_test_macros.hpp>
 #include <string>
@@ -69,6 +70,19 @@ TEST_CASE("numbering: abs (branch + merge)", "[regalloc][numbering]") {
     "v5: [10..13) uses 12\n"   // z
     "v6: [12..15) uses 14\n";  // r, used at jump(14)
   CHECK(regalloc::dump_intervals(iv) == expected_iv);
+
+  // Allocation: no idiv/call, no pressure -> everyone gets a register.
+  auto alloc = regalloc::allocate(fn, n, iv);
+  std::string const expected_alloc =
+    "v0: rcx\n"
+    "v1: rcx\n"
+    "v2: rcx\n"
+    "v3: rsi\n"
+    "v4: rdi\n"
+    "v5: rsi\n"
+    "v6: rdi\n";
+  CHECK(regalloc::dump_allocation(alloc) == expected_alloc);
+  CHECK(alloc.num_spill_slots == 0);
 }
 
 // A diamond where a value is used on only one arm, producing a real lifetime
@@ -197,4 +211,30 @@ TEST_CASE("numbering: gcd (loop / back-edge)", "[regalloc][numbering]") {
     "v8: [8..11) uses 10\n"     // is_zero
     "v9: [14..17) uses 16\n";   // r: irem result -> jump arg
   CHECK(regalloc::dump_intervals(iv) == expected_iv);
+
+  // Allocation: the irem at pos 14 pins fixed intervals on rax and rdx, so no
+  // value is placed there — including v9 (the irem result), which lands in rdi.
+  // Emission will move the result out of rax after the divide.
+  auto alloc = regalloc::allocate(fn, n, iv);
+  std::string const expected_alloc =
+    "v0: rcx\n"
+    "v1: rsi\n"
+    "v2: rcx\n"
+    "v3: rsi\n"
+    "v4: rcx\n"
+    "v5: rsi\n"
+    "v6: rcx\n"
+    "v7: rdi\n"
+    "v8: r8\n"
+    "v9: rdi\n";
+  CHECK(regalloc::dump_allocation(alloc) == expected_alloc);
+  CHECK(alloc.num_spill_slots == 0);
+
+  // No value occupies rax or rdx across the divide (fixed intervals respected).
+  for (auto const& loc : alloc.value_locs) {
+    if (loc && loc->kind == regalloc::LocKind::Reg) {
+      CHECK(loc->reg != x64::Gpr::rax);
+      CHECK(loc->reg != x64::Gpr::rdx);
+    }
+  }
 }

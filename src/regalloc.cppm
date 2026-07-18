@@ -4,14 +4,19 @@ module;
 #include <cstddef>
 #include <vector>
 #include <string>
+#include <string_view>
 #include <format>
 #include <variant>
 #include <limits>
 #include <algorithm>
+#include <array>
+#include <optional>
+#include <cassert>
 
 export module mljit.regalloc;
 
 import mljit.ir;
+import mljit.x64;
 
 export namespace mljit::regalloc {
 
@@ -76,6 +81,43 @@ struct IntervalSet {
 
 [[nodiscard]] auto build_intervals(ir::Function const& fn, Numbering const& n) -> IntervalSet;
 [[nodiscard]] auto dump_intervals(IntervalSet const& intervals) -> std::string;
+
+// ── Register model ────────────────────────────────────────────
+//
+// System V AMD64: rsp and rbp are reserved (stack + frame pointer), leaving
+// 14 allocatable general-purpose registers.  rax and rdx are placed last in
+// the allocation order so ordinary values tend to avoid them, keeping them
+// free for the instructions that force their use (idiv/irem, call results).
+inline constexpr std::array<x64::Gpr, 14> kAllocatable = {
+  x64::Gpr::rcx, x64::Gpr::rsi, x64::Gpr::rdi,
+  x64::Gpr::r8,  x64::Gpr::r9,  x64::Gpr::r10, x64::Gpr::r11,
+  x64::Gpr::rbx, x64::Gpr::r12, x64::Gpr::r13, x64::Gpr::r14, x64::Gpr::r15,
+  x64::Gpr::rax, x64::Gpr::rdx,
+};
+
+// Caller-saved (volatile) registers: destroyed across a `call`.
+inline constexpr std::array<x64::Gpr, 9> kCallerSaved = {
+  x64::Gpr::rax, x64::Gpr::rcx, x64::Gpr::rdx, x64::Gpr::rsi, x64::Gpr::rdi,
+  x64::Gpr::r8,  x64::Gpr::r9,  x64::Gpr::r10, x64::Gpr::r11,
+};
+
+enum class LocKind : std::uint8_t { Reg, Spill };
+
+struct Location {
+  LocKind    kind = LocKind::Reg;
+  x64::Gpr   reg  = x64::Gpr::rax;  // valid when kind == Reg
+  std::uint32_t slot = 0;           // valid when kind == Spill
+};
+
+// The allocator's output side-table: a location per value, SSA left untouched.
+struct Allocation {
+  std::vector<std::optional<Location>> value_locs;  // indexed by ValueId.value
+  std::uint32_t num_spill_slots = 0;
+};
+
+[[nodiscard]] auto allocate(ir::Function const& fn, Numbering const& n,
+                            IntervalSet const& intervals) -> Allocation;
+[[nodiscard]] auto dump_allocation(Allocation const& alloc) -> std::string;
 
 }  // namespace mljit::regalloc
 
@@ -407,6 +449,145 @@ auto dump_intervals(IntervalSet const& intervals) -> std::string {
       }
     }
     out += "\n";
+  }
+  return out;
+}
+
+// ── The scan ──────────────────────────────────────────────────
+
+namespace {
+
+// Earliest position covered by both range lists (holes respected), if any.
+auto first_intersection(std::vector<LiveRange> const& a,
+                        std::vector<LiveRange> const& b) -> std::optional<Pos> {
+  std::size_t i = 0, j = 0;
+  while (i < a.size() && j < b.size()) {
+    Pos const lo = std::max(a[i].from, b[j].from);
+    Pos const hi = std::min(a[i].to, b[j].to);
+    if (lo < hi) return lo;
+    if (a[i].to <= b[j].to) ++i; else ++j;
+  }
+  return std::nullopt;
+}
+
+auto pool_index(x64::Gpr reg) -> std::size_t {
+  for (std::size_t k = 0; k < kAllocatable.size(); ++k)
+    if (kAllocatable[k] == reg) return k;
+  return kAllocatable.size();  // not allocatable
+}
+
+auto reg_name(x64::Gpr r) -> std::string_view {
+  switch (r) {
+    case x64::Gpr::rax: return "rax"; case x64::Gpr::rcx: return "rcx";
+    case x64::Gpr::rdx: return "rdx"; case x64::Gpr::rbx: return "rbx";
+    case x64::Gpr::rsp: return "rsp"; case x64::Gpr::rbp: return "rbp";
+    case x64::Gpr::rsi: return "rsi"; case x64::Gpr::rdi: return "rdi";
+    case x64::Gpr::r8:  return "r8";  case x64::Gpr::r9:  return "r9";
+    case x64::Gpr::r10: return "r10"; case x64::Gpr::r11: return "r11";
+    case x64::Gpr::r12: return "r12"; case x64::Gpr::r13: return "r13";
+    case x64::Gpr::r14: return "r14"; case x64::Gpr::r15: return "r15";
+  }
+  return "?";
+}
+
+// A physical-register constraint: the register is occupied over these ranges.
+struct FixedInterval {
+  x64::Gpr               reg;
+  std::vector<LiveRange> ranges;
+};
+
+// Forced register uses become fixed intervals the scan allocates around:
+//   - idiv/irem clobber rax and rdx,
+//   - a call clobbers every caller-saved register.
+// Incoming args, the return value, and call args/results are handled by moves
+// at emission time (mov into/out of the ABI register), so they need no pin here.
+auto build_fixed_intervals(ir::Function const& fn, Numbering const& n)
+    -> std::vector<FixedInterval> {
+  std::vector<FixedInterval> fixed;
+  auto clobber = [&](x64::Gpr r, Pos p) {
+    fixed.push_back(FixedInterval{r, {LiveRange{p, p + 1}}});
+  };
+  for (auto const& blk : fn.blocks) {
+    for (auto iid : blk.instructions) {
+      auto const& inst = fn.instructions[iid.value];
+      Pos const p = n.inst_pos[iid.value];
+      std::visit(ir::overload{
+        [&](ir::IDiv const&) { clobber(x64::Gpr::rax, p); clobber(x64::Gpr::rdx, p); },
+        [&](ir::IRem const&) { clobber(x64::Gpr::rax, p); clobber(x64::Gpr::rdx, p); },
+        [&](ir::Call const&) { for (auto r : kCallerSaved) clobber(r, p); },
+        [&](auto const&) {},
+      }, inst.payload);
+    }
+  }
+  return fixed;
+}
+
+}  // namespace
+
+auto allocate(ir::Function const& fn, Numbering const& n,
+              IntervalSet const& intervals) -> Allocation {
+  auto const fixed = build_fixed_intervals(fn, n);
+
+  // Value intervals to place, sorted by (start, value id) for determinism.
+  std::vector<LiveInterval const*> work;
+  for (auto const& iv : intervals.intervals)
+    if (!iv.ranges.empty()) work.push_back(&iv);
+  std::sort(work.begin(), work.end(), [](LiveInterval const* a, LiveInterval const* b) {
+    if (a->ranges.front().from != b->ranges.front().from)
+      return a->ranges.front().from < b->ranges.front().from;
+    return a->value.value < b->value.value;
+  });
+
+  Allocation alloc;
+  alloc.value_locs.assign(fn.next_value_id, std::nullopt);
+
+  // Intervals already given a register, checked for conflicts via intersection.
+  std::vector<std::pair<LiveInterval const*, x64::Gpr>> assigned;
+
+  constexpr Pos kInf = std::numeric_limits<Pos>::max();
+
+  for (auto const* cur : work) {
+    Pos const cur_end = cur->ranges.back().to;
+
+    std::array<Pos, kAllocatable.size()> free_until;
+    free_until.fill(kInf);
+
+    auto limit_reg = [&](x64::Gpr reg, Pos until) {
+      auto const k = pool_index(reg);
+      if (k < free_until.size()) free_until[k] = std::min(free_until[k], until);
+    };
+
+    for (auto const& [iv, reg] : assigned)
+      if (auto q = first_intersection(iv->ranges, cur->ranges)) limit_reg(reg, *q);
+    for (auto const& fx : fixed)
+      if (auto q = first_intersection(fx.ranges, cur->ranges)) limit_reg(fx.reg, *q);
+
+    // First-fit in pool order among registers free for the whole interval.
+    std::size_t chosen = kAllocatable.size();
+    for (std::size_t k = 0; k < kAllocatable.size(); ++k) {
+      if (free_until[k] >= cur_end) { chosen = k; break; }
+    }
+    // Spilling (register pressure > 14) is the next slice; low-pressure
+    // functions like fib/gcd never reach it.
+    assert(chosen < kAllocatable.size() && "register spilling not yet implemented");
+
+    x64::Gpr const reg = kAllocatable[chosen];
+    alloc.value_locs[cur->value.value] = Location{LocKind::Reg, reg, 0};
+    assigned.emplace_back(cur, reg);
+  }
+
+  return alloc;
+}
+
+auto dump_allocation(Allocation const& alloc) -> std::string {
+  std::string out;
+  for (std::uint32_t i = 0; i < alloc.value_locs.size(); ++i) {
+    auto const& loc = alloc.value_locs[i];
+    if (!loc) continue;
+    if (loc->kind == LocKind::Reg)
+      out += std::format("v{}: {}\n", i, reg_name(loc->reg));
+    else
+      out += std::format("v{}: [slot {}]\n", i, loc->slot);
   }
   return out;
 }
