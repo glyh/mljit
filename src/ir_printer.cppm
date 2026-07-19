@@ -23,14 +23,14 @@ auto build_value_names(Function const& func) -> std::vector<std::string> {
       if (param.debug_name)
         names[param.id.value] = *param.debug_name;
       else
-        names[param.id.value] = "v" + std::to_string(param.id.value);
+        names[param.id.value] = std::format("{}", param.id);
     }
   }
   for (auto const& inst : func.instructions) {
     if (inst.debug_name)
       names[inst.result_id.value] = *inst.debug_name;
     else
-      names[inst.result_id.value] = "v" + std::to_string(inst.result_id.value);
+      names[inst.result_id.value] = std::format("{}", inst.result_id);
   }
   return names;
 }
@@ -48,7 +48,7 @@ auto func_label(Function const& func, size_t index) -> std::string {
 auto value_label(ValueId id, std::vector<std::string> const& names) -> std::string {
   if (id.value < names.size() && !names[id.value].empty())
     return names[id.value];
-  return "v" + std::to_string(id.value);
+  return std::format("{}", id);
 }
 
 auto fmt_inst_op(

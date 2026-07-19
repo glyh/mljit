@@ -7,6 +7,7 @@ import mljit.x64;
 #include <vector>
 #include <algorithm>
 #include <set>
+#include <variant>
 
 using namespace mljit;
 
@@ -41,30 +42,36 @@ static auto ranges_overlap(regalloc::LiveInterval const& a,
 static void check_invariants(regalloc::IntervalSet const& iv,
                              regalloc::Allocation const& alloc) {
   // (1) Every live value has a location.
-  for (auto const& interval : iv.intervals)
+  for (auto const& interval : iv)
     if (!interval.ranges.empty())
-      CHECK(alloc.value_locs[interval.value.value].has_value());
+      CHECK(alloc.value_locs[interval.value].has_value());
 
   // (2) No two overlapping intervals share a register.
-  for (std::size_t i = 0; i < iv.intervals.size(); ++i) {
-    auto const& a = iv.intervals[i];
-    auto const& la = alloc.value_locs[a.value.value];
-    if (a.ranges.empty() || !la || la->kind != regalloc::LocKind::Reg) continue;
-    for (std::size_t j = i + 1; j < iv.intervals.size(); ++j) {
-      auto const& b = iv.intervals[j];
-      auto const& lb = alloc.value_locs[b.value.value];
-      if (b.ranges.empty() || !lb || lb->kind != regalloc::LocKind::Reg) continue;
-      if (la->reg == lb->reg) CHECK_FALSE(ranges_overlap(a, b));
+  for (auto vi : iv.ids()) {
+    auto const& a = iv[vi];
+    auto const& la = alloc.value_locs[vi];
+    if (a.ranges.empty() || !la) continue;
+    auto const* ra = std::get_if<x64::Gpr>(&*la);
+    if (!ra) continue;
+    for (auto vj : iv.ids()) {
+      if (!(vi < vj)) continue;   // each unordered pair once (ValueId ordering)
+      auto const& b = iv[vj];
+      auto const& lb = alloc.value_locs[vj];
+      if (b.ranges.empty() || !lb) continue;
+      auto const* rb = std::get_if<x64::Gpr>(&*lb);
+      if (!rb) continue;
+      if (*ra == *rb) CHECK_FALSE(ranges_overlap(a, b));
     }
   }
 
   // (3) Spilled values get distinct slots, each within the frame.
   std::set<std::uint32_t> slots;
   for (auto const& loc : alloc.value_locs)
-    if (loc && loc->kind == regalloc::LocKind::Spill) {
-      CHECK(loc->slot < alloc.num_spill_slots);
-      CHECK(slots.insert(loc->slot).second);   // no duplicate slot
-    }
+    if (loc)
+      if (auto const* s = std::get_if<regalloc::SpillSlot>(&*loc)) {
+        CHECK(s->index < alloc.num_spill_slots);
+        CHECK(slots.insert(s->index).second);   // no duplicate slot
+      }
 }
 
 // abs(x): a branch/merge with block parameters.
@@ -336,12 +343,12 @@ TEST_CASE("numbering: gcd (loop / back-edge)", "[regalloc][numbering]") {
   CHECK(alloc.num_spill_slots == 0);
 
   // No value occupies rax or rdx across the divide (fixed intervals respected).
-  for (auto const& loc : alloc.value_locs) {
-    if (loc && loc->kind == regalloc::LocKind::Reg) {
-      CHECK(loc->reg != x64::Gpr::rax);
-      CHECK(loc->reg != x64::Gpr::rdx);
-    }
-  }
+  for (auto const& loc : alloc.value_locs)
+    if (loc)
+      if (auto const* preg = std::get_if<x64::Gpr>(&*loc)) {
+        CHECK(*preg != x64::Gpr::rax);
+        CHECK(*preg != x64::Gpr::rdx);
+      }
 
   // Resolution: the only real moves are on the body->loop back edge, threading
   // (a, b) <- (b, a%b): a1(rcx) <- b2(rsi), b1(rsi) <- r(rdi). Emitted in

@@ -13,6 +13,7 @@ module;
 #include <optional>
 #include <cassert>
 #include <utility>
+#include <ranges>
 
 export module mljit.regalloc;
 
@@ -75,10 +76,41 @@ struct LiveInterval {
   std::vector<Pos>       uses;     // ascending, unique
 };
 
-struct IntervalSet {
-  // Indexed by ValueId.value; entries with empty `ranges` are never live.
-  std::vector<LiveInterval> intervals;
+// A dense map keyed by ValueId.  Keeps the `.value` indexing convention in one
+// place instead of scattering `vec[id.value]` across every call site, and reads
+// as what it is ("map from value to T").
+template <typename T>
+class ValueMap {
+public:
+  ValueMap() = default;
+
+  void assign(std::size_t count, T const& init) { data_.assign(count, init); }
+
+  [[nodiscard]] auto operator[](ir::ValueId v) -> T&             { return data_[v.value]; }
+  [[nodiscard]] auto operator[](ir::ValueId v) const -> T const& { return data_[v.value]; }
+
+  [[nodiscard]] auto size() const -> std::size_t { return data_.size(); }
+
+  // Iterate the *keys*: `for (ir::ValueId v : m.ids()) use(m[v]);` — so callers
+  // never rebuild a ValueId from a raw index.
+  [[nodiscard]] auto ids() const {
+    return std::views::iota(std::uint32_t{0}, static_cast<std::uint32_t>(data_.size()))
+         | std::views::transform([](std::uint32_t i) { return ir::ValueId{i}; });
+  }
+
+  // Iterate the mapped values (keys not needed).
+  [[nodiscard]] auto begin()       { return data_.begin(); }
+  [[nodiscard]] auto end()         { return data_.end(); }
+  [[nodiscard]] auto begin() const { return data_.begin(); }
+  [[nodiscard]] auto end()   const { return data_.end(); }
+
+private:
+  std::vector<T> data_;
 };
+
+// Live intervals for every value, keyed by ValueId; a value with empty `ranges`
+// is never live.
+using IntervalSet = ValueMap<LiveInterval>;
 
 [[nodiscard]] auto build_intervals(ir::Function const& fn, Numbering const& n) -> IntervalSet;
 [[nodiscard]] auto dump_intervals(IntervalSet const& intervals) -> std::string;
@@ -103,19 +135,21 @@ inline constexpr std::array<x64::Gpr, 9> kCallerSaved = {
   x64::Gpr::r8,  x64::Gpr::r9,  x64::Gpr::r10, x64::Gpr::r11,
 };
 
-enum class LocKind : std::uint8_t { Reg, Spill };
-
-struct Location {
-  LocKind    kind = LocKind::Reg;
-  x64::Gpr   reg  = x64::Gpr::rax;  // valid when kind == Reg
-  std::uint32_t slot = 0;           // valid when kind == Spill
-
-  auto operator==(Location const&) const -> bool = default;
+// A spill slot: an index into the function's stack frame.
+struct SpillSlot {
+  std::uint32_t index = 0;
+  auto operator==(SpillSlot const&) const -> bool = default;
 };
+
+// A value's home is *either* a physical register *or* a spill slot.  Modelling
+// it as a sum type (not a tagged struct with dead fields) makes the illegal
+// "register + slot" state unrepresentable and gives correct equality for free.
+// Payloads are read with std::visit (exhaustive) — never an unchecked accessor.
+using Location = std::variant<x64::Gpr, SpillSlot>;
 
 // The allocator's output side-table: a location per value, SSA left untouched.
 struct Allocation {
-  std::vector<std::optional<Location>> value_locs;  // indexed by ValueId.value
+  ValueMap<std::optional<Location>> value_locs;
   std::uint32_t num_spill_slots = 0;
 };
 
@@ -130,6 +164,15 @@ struct Allocation {
 // *parallel* assignment `param_i <- arg_i`; it is sequentialized so no
 // destination is clobbered before it is read, and register cycles are broken
 // with `xchg` (no scratch register reserved).
+// TODO(cleanup): Move is really a sum type — a move is *either* `dst <- src`
+// *or* `xchg a, b` — but it is modelled as a product with an op tag and two
+// double-purposed fields (dst/src are misnamed for the symmetric xchg case).
+// Replace with:
+//     struct MovOp  { Location dst; Location src; };  // dst <- src
+//     struct XchgOp { Location a;   Location b;   };   // swap a, b
+//     using Move = std::variant<MovOp, XchgOp>;
+// and dispatch with std::visit in sequentialize/dump_resolution/the emitter,
+// the same way Location was cleaned up.
 enum class MoveOp : std::uint8_t { Mov, Xchg };
 
 struct Move {
@@ -191,7 +234,7 @@ auto value_name(ir::ValueId id, ir::Function const& fn) -> std::string {
       if (p.id == id && p.debug_name) return *p.debug_name;
   for (auto const& inst : fn.instructions)
     if (inst.result_id == id && inst.debug_name) return *inst.debug_name;
-  return "v" + std::to_string(id.value);
+  return std::format("{}", id);
 }
 
 auto inst_kind(ir::InstPayload const& p) -> std::string_view {
@@ -391,9 +434,9 @@ auto compute_loop_ends(ir::Function const& fn, Numbering const& n) -> std::vecto
 
 auto build_intervals(ir::Function const& fn, Numbering const& n) -> IntervalSet {
   IntervalSet result;
-  result.intervals.assign(fn.next_value_id, LiveInterval{});
+  result.assign(fn.next_value_id, LiveInterval{});
   for (std::uint32_t i = 0; i < fn.next_value_id; ++i)
-    result.intervals[i].value = ir::ValueId{i};
+    result[ir::ValueId{i}].value = ir::ValueId{i};
 
   auto const loop_end = compute_loop_ends(fn, n);
 
@@ -420,13 +463,13 @@ auto build_intervals(ir::Function const& fn, Numbering const& n) -> IntervalSet 
 
     // Everything live-out lives through the whole block (initially).
     for (std::uint32_t i = 0; i < live.size(); ++i)
-      if (live[i]) add_range(result.intervals[i], bfrom, bto);
+      if (live[i]) add_range(result[ir::ValueId{i}], bfrom, bto);
 
     // Terminator: reads its inputs at tpos.
     if (blk.terminator) {
       for (auto v : term_inputs(*blk.terminator)) {
-        add_range(result.intervals[v.value], bfrom, tpos + 1);
-        result.intervals[v.value].uses.push_back(tpos);
+        add_range(result[v], bfrom, tpos + 1);
+        result[v].uses.push_back(tpos);
         set_add(live, v);
       }
     }
@@ -437,19 +480,19 @@ auto build_intervals(ir::Function const& fn, Numbering const& n) -> IntervalSet 
       auto const& inst = fn.instructions[iid.value];
       Pos const ipos = n.inst_pos[iid.value];
 
-      set_from(result.intervals[inst.result_id.value], ipos);
+      set_from(result[inst.result_id], ipos);
       live[inst.result_id.value] = 0;
 
       for (auto v : inst_inputs(inst.payload)) {
-        add_range(result.intervals[v.value], bfrom, ipos + 1);
-        result.intervals[v.value].uses.push_back(ipos);
+        add_range(result[v], bfrom, ipos + 1);
+        result[v].uses.push_back(ipos);
         set_add(live, v);
       }
     }
 
     // Block parameters are defined at the block-entry slot.
     for (auto const& p : blk.params) {
-      set_from(result.intervals[p.id.value], bfrom);
+      set_from(result[p.id], bfrom);
       live[p.id.value] = 0;
     }
 
@@ -458,14 +501,14 @@ auto build_intervals(ir::Function const& fn, Numbering const& n) -> IntervalSet 
     if (loop_end[bid.value] != 0) {
       Pos const e = loop_end[bid.value];
       for (std::uint32_t i = 0; i < live.size(); ++i)
-        if (live[i]) add_range(result.intervals[i], bfrom, e);
+        if (live[i]) add_range(result[ir::ValueId{i}], bfrom, e);
     }
 
     live_in[bid.value] = std::move(live);
   }
 
   // Finalize: sort + dedup use lists.
-  for (auto& iv : result.intervals) {
+  for (auto& iv : result) {
     std::sort(iv.uses.begin(), iv.uses.end());
     iv.uses.erase(std::unique(iv.uses.begin(), iv.uses.end()), iv.uses.end());
   }
@@ -474,10 +517,10 @@ auto build_intervals(ir::Function const& fn, Numbering const& n) -> IntervalSet 
 
 auto dump_intervals(IntervalSet const& intervals) -> std::string {
   std::string out;
-  for (std::uint32_t i = 0; i < intervals.intervals.size(); ++i) {
-    auto const& iv = intervals.intervals[i];
+  for (auto v : intervals.ids()) {
+    auto const& iv = intervals[v];
     if (iv.ranges.empty()) continue;
-    out += std::format("v{}:", i);
+    out += std::format("{}:", v);
     for (auto const& r : iv.ranges)
       out += std::format(" [{}..{})", r.from, r.to);
     out += " uses ";
@@ -571,7 +614,7 @@ auto allocate(ir::Function const& fn, Numbering const& n,
 
   // Value intervals to place, sorted by (start, value id) for determinism.
   std::vector<LiveInterval const*> work;
-  for (auto const& iv : intervals.intervals)
+  for (auto const& iv : intervals)
     if (!iv.ranges.empty()) work.push_back(&iv);
   std::sort(work.begin(), work.end(), [](LiveInterval const* a, LiveInterval const* b) {
     if (a->ranges.front().from != b->ranges.front().from)
@@ -619,7 +662,7 @@ auto allocate(ir::Function const& fn, Numbering const& n,
 
     if (chosen < kAllocatable.size()) {
       x64::Gpr const reg = kAllocatable[chosen];
-      alloc.value_locs[cur->value.value] = Location{LocKind::Reg, reg, 0};
+      alloc.value_locs[cur->value] = Location{reg};
       assigned.emplace_back(cur, reg);
       continue;
     }
@@ -644,19 +687,19 @@ auto allocate(ir::Function const& fn, Numbering const& n,
 
     if (victim_k == kAllocatable.size() || cur_next >= victim_next) {
       // `cur` is used furthest out (or nothing evictable) -> spill `cur`.
-      alloc.value_locs[cur->value.value] = Location{LocKind::Spill, x64::Gpr::rax, next_slot++};
+      alloc.value_locs[cur->value] = Location{SpillSlot{next_slot++}};
     } else {
       // Evict the conflicting value(s) in the victim register to slots, then
       // give that register to `cur`.
       x64::Gpr const reg = kAllocatable[victim_k];
       for (auto const& [iv, r] : assigned)
         if (r == reg && first_intersection(iv->ranges, cur->ranges))
-          alloc.value_locs[iv->value.value] = Location{LocKind::Spill, x64::Gpr::rax, next_slot++};
+          alloc.value_locs[iv->value] = Location{SpillSlot{next_slot++}};
       std::erase_if(assigned, [&](auto const& p) {
-        auto const& loc = alloc.value_locs[p.first->value.value];
-        return p.second == reg && loc && loc->kind == LocKind::Spill;
+        auto const& loc = alloc.value_locs[p.first->value];
+        return p.second == reg && loc && std::holds_alternative<SpillSlot>(*loc);
       });
-      alloc.value_locs[cur->value.value] = Location{LocKind::Reg, reg, 0};
+      alloc.value_locs[cur->value] = Location{reg};
       assigned.emplace_back(cur, reg);
     }
   }
@@ -667,13 +710,13 @@ auto allocate(ir::Function const& fn, Numbering const& n,
 
 auto dump_allocation(Allocation const& alloc) -> std::string {
   std::string out;
-  for (std::uint32_t i = 0; i < alloc.value_locs.size(); ++i) {
-    auto const& loc = alloc.value_locs[i];
+  for (auto v : alloc.value_locs.ids()) {
+    auto const& loc = alloc.value_locs[v];
     if (!loc) continue;
-    if (loc->kind == LocKind::Reg)
-      out += std::format("v{}: {}\n", i, reg_name(loc->reg));
-    else
-      out += std::format("v{}: [slot {}]\n", i, loc->slot);
+    out += std::visit(ir::overload{
+      [&](x64::Gpr r)   { return std::format("{}: {}\n", v, reg_name(r)); },
+      [&](SpillSlot s)  { return std::format("{}: [slot {}]\n", v, s.index); },
+    }, *loc);
   }
   return out;
 }
@@ -737,8 +780,10 @@ auto sequentialize(std::vector<std::pair<Location, Location>> pm) -> std::vector
 }
 
 auto loc_str(Location l) -> std::string {
-  if (l.kind == LocKind::Reg) return std::string(reg_name(l.reg));
-  return std::format("[slot {}]", l.slot);
+  return std::visit(ir::overload{
+    [](x64::Gpr r)  { return std::string(reg_name(r)); },
+    [](SpillSlot s) { return std::format("[slot {}]", s.index); },
+  }, l);
 }
 
 }  // namespace
@@ -754,7 +799,7 @@ auto resolve(ir::Function const& fn, Numbering const& n, Allocation const& alloc
       for (auto s : successors(blk)) ++pred_count[s.value];
 
   auto loc_of = [&](ir::ValueId v) -> Location {
-    auto const& l = alloc.value_locs[v.value];
+    auto const& l = alloc.value_locs[v];
     assert(l && "value has no location");
     return *l;
   };

@@ -54,55 +54,63 @@ struct Emitter {
   regalloc::Allocation const&  alloc;
   std::uint32_t                num_saved;   // callee-saved slots above the spills
 
-  auto loc(ir::ValueId v) const -> regalloc::Location { return *alloc.value_locs[v.value]; }
-  static auto is_spill(regalloc::Location l) -> bool { return l.kind == regalloc::LocKind::Spill; }
+  auto loc(ir::ValueId v) const -> regalloc::Location { return *alloc.value_locs[v]; }
 
-  // Stack address of spill slot `slot`: below the saved callee-saved registers.
-  auto slot_mem(std::uint32_t slot) const -> x64::Mem {
-    return x64::Mem{x64::Gpr::rbp, -static_cast<std::int32_t>(8 * (num_saved + slot + 1))};
+  // Stack address of a spill slot: below the saved callee-saved registers.
+  auto slot_mem(regalloc::SpillSlot s) const -> x64::Mem {
+    return x64::Mem{x64::Gpr::rbp, -static_cast<std::int32_t>(8 * (num_saved + s.index + 1))};
   }
 
   // Value into a register: its own if in one, else loaded into `scratch`.
   auto use(ir::ValueId v, x64::Gpr scratch) -> x64::Gpr {
-    auto const l = loc(v);
-    if (!is_spill(l)) return l.reg;
-    a.mov_rm(scratch, slot_mem(l.slot));
-    return scratch;
+    return std::visit(ir::overload{
+      [&](x64::Gpr r) -> x64::Gpr { return r; },
+      [&](regalloc::SpillSlot s) -> x64::Gpr { a.mov_rm(scratch, slot_mem(s)); return scratch; },
+    }, loc(v));
   }
 
   // Register to compute a result into: its own, or `scratch` if spilled.
   auto dest(ir::ValueId v, x64::Gpr scratch) -> x64::Gpr {
-    auto const l = loc(v);
-    return is_spill(l) ? scratch : l.reg;
+    return std::visit(ir::overload{
+      [&](x64::Gpr r) -> x64::Gpr { return r; },
+      [&](regalloc::SpillSlot) -> x64::Gpr { return scratch; },
+    }, loc(v));
   }
 
   // Store a just-computed result back to its slot if spilled.
   void store(ir::ValueId v, x64::Gpr reg) {
-    auto const l = loc(v);
-    if (is_spill(l)) a.mov_mr(slot_mem(l.slot), reg);
+    std::visit(ir::overload{
+      [&](x64::Gpr) {},
+      [&](regalloc::SpillSlot s) { a.mov_mr(slot_mem(s), reg); },
+    }, loc(v));
   }
 
-  // Emit one resolution/parallel move, handling register and slot operands.
+  // Emit one resolution/parallel move.  Dispatch on *both* operands at once:
+  // the four-way visit is exhaustive, so no register/slot combination is missed.
   void move(regalloc::Move const& m) {
-    bool const dm = is_spill(m.dst), sm = is_spill(m.src);
+    using regalloc::SpillSlot;
     if (m.op == regalloc::MoveOp::Mov) {
-      if      (!dm && !sm) a.mov_rr(m.dst.reg, m.src.reg);
-      else if (!dm &&  sm) a.mov_rm(m.dst.reg, slot_mem(m.src.slot));
-      else if ( dm && !sm) a.mov_mr(slot_mem(m.dst.slot), m.src.reg);
-      else { a.mov_rm(kScratch1, slot_mem(m.src.slot));
-             a.mov_mr(slot_mem(m.dst.slot), kScratch1); }
+      std::visit(ir::overload{
+        [&](x64::Gpr d,  x64::Gpr s)  { a.mov_rr(d, s); },
+        [&](x64::Gpr d,  SpillSlot s) { a.mov_rm(d, slot_mem(s)); },
+        [&](SpillSlot d, x64::Gpr s)  { a.mov_mr(slot_mem(d), s); },
+        [&](SpillSlot d, SpillSlot s) { a.mov_rm(kScratch1, slot_mem(s));
+                                        a.mov_mr(slot_mem(d), kScratch1); },
+      }, m.dst, m.src);
     } else {  // Xchg
-      if      (!dm && !sm) a.xchg_rr(m.dst.reg, m.src.reg);
-      else if ( dm && !sm) swap_reg_slot(m.src.reg, m.dst.slot);
-      else if (!dm &&  sm) swap_reg_slot(m.dst.reg, m.src.slot);
-      else { a.mov_rm(kScratch1, slot_mem(m.dst.slot));
-             a.mov_rm(kScratch2, slot_mem(m.src.slot));
-             a.mov_mr(slot_mem(m.dst.slot), kScratch2);
-             a.mov_mr(slot_mem(m.src.slot), kScratch1); }
+      std::visit(ir::overload{
+        [&](x64::Gpr d,  x64::Gpr s)  { a.xchg_rr(d, s); },
+        [&](x64::Gpr d,  SpillSlot s) { swap_reg_slot(d, s); },
+        [&](SpillSlot d, x64::Gpr s)  { swap_reg_slot(s, d); },
+        [&](SpillSlot d, SpillSlot s) { a.mov_rm(kScratch1, slot_mem(d));
+                                        a.mov_rm(kScratch2, slot_mem(s));
+                                        a.mov_mr(slot_mem(d), kScratch2);
+                                        a.mov_mr(slot_mem(s), kScratch1); },
+      }, m.dst, m.src);
     }
   }
 
-  void swap_reg_slot(x64::Gpr reg, std::uint32_t slot) {
+  void swap_reg_slot(x64::Gpr reg, regalloc::SpillSlot slot) {
     a.mov_rm(kScratch1, slot_mem(slot));
     a.mov_mr(slot_mem(slot), reg);
     a.mov_rr(reg, kScratch1);
@@ -174,7 +182,7 @@ struct Emitter {
     assert(c.callee == self && "cross-function calls not yet supported");
     std::vector<std::pair<regalloc::Location, regalloc::Location>> pm;
     for (std::size_t i = 0; i < c.args.size(); ++i)
-      pm.emplace_back(regalloc::Location{regalloc::LocKind::Reg, kArgRegs[i], 0}, loc(c.args[i]));
+      pm.emplace_back(regalloc::Location{kArgRegs[i]}, loc(c.args[i]));
     for (auto const& m : regalloc::sequentialize_parallel_moves(pm)) move(m);
     a.call(entry_label);
     x64::Gpr const d = dest(inst.result_id, kScratch1);
@@ -244,7 +252,7 @@ auto compile(ir::Module const& mod, ir::FunctionId fid) -> x64::ExecBuffer {
   std::vector<x64::Gpr> saved;
   for (auto r : kCalleeSaved)
     for (auto const& l : alloc.value_locs)
-      if (l && l->kind == regalloc::LocKind::Reg && l->reg == r) { saved.push_back(r); break; }
+      if (l && *l == regalloc::Location{r}) { saved.push_back(r); break; }
 
   auto const num_saved = static_cast<std::uint32_t>(saved.size());
   // Frame below rbp holds the callee-saved saves then the spill slots, rounded
@@ -287,8 +295,8 @@ auto compile(ir::Module const& mod, ir::FunctionId fid) -> x64::ExecBuffer {
   auto const& entry = fn.blocks[0];
   std::vector<std::pair<regalloc::Location, regalloc::Location>> pin;
   for (std::size_t i = 0; i < entry.params.size(); ++i)
-    pin.emplace_back(*alloc.value_locs[entry.params[i].id.value],
-                     regalloc::Location{regalloc::LocKind::Reg, kArgRegs[i], 0});
+    pin.emplace_back(*alloc.value_locs[entry.params[i].id],
+                     regalloc::Location{kArgRegs[i]});
   for (auto const& m : regalloc::sequentialize_parallel_moves(pin)) e.move(m);
 
   // ── Epilogue ── (restore callee-saved, unwind frame)

@@ -7,6 +7,7 @@ module;
 #include <vector>
 #include <variant>
 #include <cassert>
+#include <format>
 
 export module mljit.ir;
 
@@ -46,10 +47,19 @@ struct SourceSpan {
 };
 
 // ── Strongly typed IDs ─────────────────────────────────────
-struct FunctionId    { uint32_t value = 0; auto operator<=>(FunctionId const&) const = default; };
-struct BlockId       { uint32_t value = 0; auto operator<=>(BlockId const&) const = default; };
-struct ValueId       { uint32_t value = 0; auto operator<=>(ValueId const&) const = default; };
-struct InstructionId { uint32_t value = 0; auto operator<=>(InstructionId const&) const = default; };
+// A phantom `Tag` makes each id a distinct type (so a BlockId can't be passed
+// where a ValueId is expected), while the field and comparisons are written
+// once.  The tag is never instantiated — it exists only to separate the types.
+template <typename Tag>
+struct Id {
+  uint32_t value = 0;
+  auto operator<=>(Id const&) const = default;
+};
+
+using FunctionId    = Id<struct FunctionTag>;
+using BlockId       = Id<struct BlockTag>;
+using ValueId       = Id<struct ValueTag>;
+using InstructionId = Id<struct InstructionTag>;
 
 // ── Block parameter ────────────────────────────────────────
 struct BlockParam {
@@ -422,3 +432,13 @@ inline void FunctionBuilder::branch(
 }
 
 } // namespace mljit::ir
+
+// Render a ValueId as `v<n>` (the canonical textual name), so dumps write
+// std::format("{}", id) instead of hand-prefixing and extracting .value.
+template <>
+struct std::formatter<mljit::ir::ValueId> {
+  constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
+  auto format(mljit::ir::ValueId id, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "v{}", id.value);
+  }
+};
