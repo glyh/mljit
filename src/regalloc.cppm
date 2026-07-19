@@ -574,22 +574,33 @@ auto reg_name(x64::Gpr r) -> std::string_view {
   return "?";
 }
 
-// A physical-register constraint: the register is occupied over these ranges.
-struct FixedInterval {
-  x64::Gpr               reg;
-  std::vector<LiveRange> ranges;
-};
+// True if any range contains position `p`.
+auto covers(std::vector<LiveRange> const& ranges, Pos p) -> bool {
+  for (auto const& r : ranges)
+    if (r.from <= p && p < r.to) return true;
+  return false;
+}
 
-// Forced register uses become fixed intervals the scan allocates around:
+auto interval_end(std::vector<LiveRange> const& ranges) -> Pos { return ranges.back().to; }
+
+// The first use at or after `pos`, or +inf if none.
+auto next_use(std::vector<Pos> const& uses, Pos pos) -> Pos {
+  for (Pos u : uses) if (u >= pos) return u;
+  return std::numeric_limits<Pos>::max();
+}
+
+// Forced register uses become one fixed interval per *allocatable* register — a
+// range-list of the points where that register is clobbered:
 //   - idiv/irem clobber rax and rdx,
 //   - a call clobbers every caller-saved register.
-// Incoming args, the return value, and call args/results are handled by moves
-// at emission time (mov into/out of the ABI register), so they need no pin here.
-auto build_fixed_intervals(ir::Function const& fn, Numbering const& n)
-    -> std::vector<FixedInterval> {
-  std::vector<FixedInterval> fixed;
+// (Incoming args, the return value, and call args/results are handled by moves
+// at emission time, so they need no pin here.)  Indexed like kAllocatable.
+auto build_fixed_ranges(ir::Function const& fn, Numbering const& n)
+    -> std::array<std::vector<LiveRange>, kAllocatable.size()> {
+  std::array<std::vector<LiveRange>, kAllocatable.size()> fixed;
   auto clobber = [&](x64::Gpr r, Pos p) {
-    fixed.push_back(FixedInterval{r, {LiveRange{p, p + 1}}});
+    auto const k = pool_index(r);
+    if (k < fixed.size()) fixed[k].push_back(LiveRange{p, p + 1});
   };
   for (auto const& blk : fn.blocks) {
     for (auto iid : blk.instructions) {
@@ -603,20 +614,34 @@ auto build_fixed_intervals(ir::Function const& fn, Numbering const& n)
       }, inst.payload);
     }
   }
+  for (auto& ranges : fixed)
+    std::sort(ranges.begin(), ranges.end(),
+              [](LiveRange const& a, LiveRange const& b) { return a.from < b.from; });
   return fixed;
 }
 
 }  // namespace
 
+// A textbook linear-scan interval that currently occupies a register: either a
+// value interval (spillable) or a pre-coloured fixed interval (a clobber, never
+// spillable).  `ranges`/`uses` point into the owning LiveInterval or fixed list.
+struct Active {
+  std::vector<LiveRange> const* ranges;
+  std::vector<Pos> const*       uses;    // nullptr for fixed intervals
+  ir::ValueId                   value;   // meaningful only when !fixed
+  x64::Gpr                      reg;
+  bool                          fixed;
+};
+
 auto allocate(ir::Function const& fn, Numbering const& n,
               IntervalSet const& intervals) -> Allocation {
-  auto const fixed = build_fixed_intervals(fn, n);
+  auto const fixed_ranges = build_fixed_ranges(fn, n);
 
-  // Value intervals to place, sorted by (start, value id) for determinism.
-  std::vector<LiveInterval const*> work;
+  // unhandled: value intervals to place, sorted by (start, id) for determinism.
+  std::vector<LiveInterval const*> unhandled;
   for (auto const& iv : intervals)
-    if (!iv.ranges.empty()) work.push_back(&iv);
-  std::sort(work.begin(), work.end(), [](LiveInterval const* a, LiveInterval const* b) {
+    if (!iv.ranges.empty()) unhandled.push_back(&iv);
+  std::sort(unhandled.begin(), unhandled.end(), [](LiveInterval const* a, LiveInterval const* b) {
     if (a->ranges.front().from != b->ranges.front().from)
       return a->ranges.front().from < b->ranges.front().from;
     return a->value.value < b->value.value;
@@ -624,83 +649,119 @@ auto allocate(ir::Function const& fn, Numbering const& n,
 
   Allocation alloc;
   alloc.value_locs.assign(fn.next_value_id, std::nullopt);
-
-  // Intervals already given a register, checked for conflicts via intersection.
-  std::vector<std::pair<LiveInterval const*, x64::Gpr>> assigned;
   std::uint32_t next_slot = 0;
 
   constexpr Pos kInf = std::numeric_limits<Pos>::max();
 
-  auto next_use_from = [](LiveInterval const& iv, Pos pos) -> Pos {
-    for (Pos u : iv.uses) if (u >= pos) return u;
-    return kInf;
-  };
+  // active: intervals covering the current position; inactive: intervals with a
+  // register but currently in a hole (they'll cover a later position).  Fixed
+  // intervals are pre-loaded so the scan always sees future clobbers even though
+  // we never split — a value must avoid a register clobbered anywhere in its life.
+  std::vector<Active> active;
+  std::vector<Active> inactive;
+  for (std::size_t k = 0; k < kAllocatable.size(); ++k)
+    if (!fixed_ranges[k].empty())
+      inactive.push_back(Active{&fixed_ranges[k], nullptr, ir::ValueId{}, kAllocatable[k], true});
 
-  for (auto const* cur : work) {
-    Pos const cur_start = cur->ranges.front().from;
-    Pos const cur_end   = cur->ranges.back().to;
+  for (auto const* cur : unhandled) {
+    Pos const position = cur->ranges.front().from;
+    Pos const cur_end  = cur->ranges.back().to;
 
-    // How far each register is free for `cur`, split by cause: value intervals
-    // (spillable) vs. fixed intervals (hard constraints — idiv/call clobbers).
-    std::array<Pos, kAllocatable.size()> value_free;  value_free.fill(kInf);
-    std::array<Pos, kAllocatable.size()> fixed_free;  fixed_free.fill(kInf);
-    for (auto const& [iv, reg] : assigned)
-      if (auto q = first_intersection(iv->ranges, cur->ranges)) {
-        auto const k = pool_index(reg);
-        if (k < value_free.size()) value_free[k] = std::min(value_free[k], *q);
+    // ── Advance the sets to `position` ──
+    // active -> handled (ended) or inactive (fell into a hole).
+    {
+      std::vector<Active> keep;
+      for (auto const& it : active) {
+        if (interval_end(*it.ranges) <= position) continue;            // handled
+        else if (!covers(*it.ranges, position)) inactive.push_back(it); // -> inactive
+        else keep.push_back(it);
       }
-    for (auto const& fx : fixed)
-      if (auto q = first_intersection(fx.ranges, cur->ranges)) {
-        auto const k = pool_index(fx.reg);
-        if (k < fixed_free.size()) fixed_free[k] = std::min(fixed_free[k], *q);
+      active = std::move(keep);
+    }
+    // inactive -> handled (ended) or active (hole ended).
+    {
+      std::vector<Active> keep;
+      for (auto const& it : inactive) {
+        if (interval_end(*it.ranges) <= position) continue;           // handled
+        else if (covers(*it.ranges, position)) active.push_back(it);  // -> active
+        else keep.push_back(it);
+      }
+      inactive = std::move(keep);
+    }
+
+    // ── TRYALLOCATEFREEREG: how far is each register free for `cur`? ──
+    std::array<Pos, kAllocatable.size()> free_until;
+    free_until.fill(kInf);
+    for (auto const& it : active) {                       // busy right now
+      auto const k = pool_index(it.reg);
+      if (k < free_until.size()) free_until[k] = 0;
+    }
+    for (auto const& it : inactive)                       // busy again at the next overlap
+      if (auto q = first_intersection(*it.ranges, cur->ranges)) {
+        auto const k = pool_index(it.reg);
+        if (k < free_until.size()) free_until[k] = std::min(free_until[k], *q);
       }
 
-    // First-fit: a register free for the whole interval from both causes.
+    // First-fit in pool order among registers free for the whole interval.
     std::size_t chosen = kAllocatable.size();
     for (std::size_t k = 0; k < kAllocatable.size(); ++k)
-      if (value_free[k] >= cur_end && fixed_free[k] >= cur_end) { chosen = k; break; }
+      if (free_until[k] >= cur_end) { chosen = k; break; }
 
     if (chosen < kAllocatable.size()) {
       x64::Gpr const reg = kAllocatable[chosen];
       alloc.value_locs[cur->value] = Location{reg};
-      assigned.emplace_back(cur, reg);
+      active.push_back(Active{&cur->ranges, &cur->uses, cur->value, reg, false});
       continue;
     }
 
-    // No register free -> spill.  Belady: among registers not blocked by a
-    // fixed interval, pick the one whose blocking value is used furthest out.
-    Pos const cur_next = next_use_from(*cur, cur_start);
+    // ── ALLOCATEBLOCKEDREG: no register free -> spill (whole-interval Belady) ──
+    // Per register, the soonest next use of a *value* blocking it; a register
+    // blocked by a fixed interval cannot be evicted.
+    std::array<Pos, kAllocatable.size()>  next_use_at;  next_use_at.fill(kInf);
+    std::array<bool, kAllocatable.size()> fixed_blocked; fixed_blocked.fill(false);
+    auto account = [&](Active const& it) {
+      if (!first_intersection(*it.ranges, cur->ranges)) return;
+      auto const k = pool_index(it.reg);
+      if (k >= kAllocatable.size()) return;
+      if (it.fixed) fixed_blocked[k] = true;
+      else next_use_at[k] = std::min(next_use_at[k], next_use(*it.uses, position));
+    };
+    for (auto const& it : active)   account(it);
+    for (auto const& it : inactive) account(it);
+
+    // The evictable register whose blocking value is used furthest out.
     std::size_t victim_k = kAllocatable.size();
     Pos victim_next = 0;
     for (std::size_t k = 0; k < kAllocatable.size(); ++k) {
-      if (fixed_free[k] < cur_end) continue;   // fixed constraint — cannot evict
-      if (value_free[k] >= cur_end) continue;  // not actually blocked (shouldn't fit above, but guard)
-      Pos furthest = 0;
-      for (auto const& [iv, reg] : assigned)
-        if (pool_index(reg) == k && first_intersection(iv->ranges, cur->ranges))
-          furthest = std::max(furthest, next_use_from(*iv, cur_start));
-      if (victim_k == kAllocatable.size() || furthest > victim_next) {
-        victim_next = furthest;
+      if (fixed_blocked[k] || next_use_at[k] == kInf) continue;
+      if (victim_k == kAllocatable.size() || next_use_at[k] > victim_next) {
+        victim_next = next_use_at[k];
         victim_k = k;
       }
     }
 
+    Pos const cur_next = next_use(cur->uses, position);
     if (victim_k == kAllocatable.size() || cur_next >= victim_next) {
-      // `cur` is used furthest out (or nothing evictable) -> spill `cur`.
+      // `cur` itself is used furthest out (or nothing evictable) -> spill it.
       alloc.value_locs[cur->value] = Location{SpillSlot{next_slot++}};
     } else {
-      // Evict the conflicting value(s) in the victim register to slots, then
-      // give that register to `cur`.
+      // Evict the conflicting value(s) in the victim register to slots (drop
+      // them from active/inactive), then give that register to `cur`.
       x64::Gpr const reg = kAllocatable[victim_k];
-      for (auto const& [iv, r] : assigned)
-        if (r == reg && first_intersection(iv->ranges, cur->ranges))
-          alloc.value_locs[iv->value] = Location{SpillSlot{next_slot++}};
-      std::erase_if(assigned, [&](auto const& p) {
-        auto const& loc = alloc.value_locs[p.first->value];
-        return p.second == reg && loc && std::holds_alternative<SpillSlot>(*loc);
-      });
+      auto evict = [&](std::vector<Active>& set) {
+        std::vector<Active> keep;
+        for (auto const& it : set) {
+          if (!it.fixed && it.reg == reg && first_intersection(*it.ranges, cur->ranges))
+            alloc.value_locs[it.value] = Location{SpillSlot{next_slot++}};
+          else
+            keep.push_back(it);
+        }
+        set = std::move(keep);
+      };
+      evict(active);
+      evict(inactive);
       alloc.value_locs[cur->value] = Location{reg};
-      assigned.emplace_back(cur, reg);
+      active.push_back(Active{&cur->ranges, &cur->uses, cur->value, reg, false});
     }
   }
 
