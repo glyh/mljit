@@ -202,10 +202,14 @@ void emit_jcc(x64::Assembler& a, ir::IcmpCond cond, x64::Label target) {
   }
 }
 
+// Maps a ValueId to its defining instruction, or nullptr for a block parameter.
+// A nullable *non-owning* observer — the idiomatic use of a raw pointer (the
+// instructions are owned by the Function, not here).
+using DefMap = std::vector<ir::Instruction const*>;
+
 // Assert that no icmp result is used as a value (only fused into branches),
 // since the emitter lowers icmp to a bare compare with no setcc materialization.
-void guard_no_i1_values(ir::Function const& fn,
-                        std::vector<ir::Instruction const*> const& def) {
+void guard_no_i1_values(ir::Function const& fn, DefMap const& def) {
   auto is_icmp = [&](ir::ValueId v) {
     auto const* d = def[v.value];
     return d && std::holds_alternative<ir::ICmp>(d->payload);
@@ -244,7 +248,7 @@ auto compile(ir::Module const& mod, ir::FunctionId fid) -> x64::ExecBuffer {
   auto const res   = regalloc::resolve(fn, n, alloc);
 
   // Defining instruction per value (for icmp/branch fusion). Params -> nullptr.
-  std::vector<ir::Instruction const*> def(fn.next_value_id, nullptr);
+  DefMap def(fn.next_value_id, nullptr);
   for (auto const& inst : fn.instructions) def[inst.result_id.value] = &inst;
   guard_no_i1_values(fn, def);
 

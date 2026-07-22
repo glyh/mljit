@@ -14,6 +14,7 @@ module;
 #include <cassert>
 #include <utility>
 #include <ranges>
+#include <functional>
 
 export module mljit.regalloc;
 
@@ -622,29 +623,36 @@ auto build_fixed_ranges(ir::Function const& fn, Numbering const& n)
 
 }  // namespace
 
-// A textbook linear-scan interval that currently occupies a register: either a
-// value interval (spillable) or a pre-coloured fixed interval (a clobber, never
-// spillable).  `ranges`/`uses` point into the owning LiveInterval or fixed list.
+// The value payload of an Active entry — absent for a pre-coloured fixed
+// interval (a clobber), which is never spilled and has no uses of its own.
+struct LiveValue {
+  ir::ValueId                                    value;
+  std::reference_wrapper<std::vector<Pos> const> uses;
+};
+
+// A textbook linear-scan interval currently occupying a register.  `live`
+// distinguishes a value interval (present, spillable) from a pre-coloured fixed
+// interval (nullopt).  The references view into `intervals` / `fixed_ranges`.
 struct Active {
-  std::vector<LiveRange> const* ranges;
-  std::vector<Pos> const*       uses;    // nullptr for fixed intervals
-  ir::ValueId                   value;   // meaningful only when !fixed
-  x64::Gpr                      reg;
-  bool                          fixed;
+  std::reference_wrapper<std::vector<LiveRange> const> ranges;
+  x64::Gpr                                             reg;
+  std::optional<LiveValue>                             live;
 };
 
 auto allocate(ir::Function const& fn, Numbering const& n,
               IntervalSet const& intervals) -> Allocation {
   auto const fixed_ranges = build_fixed_ranges(fn, n);
 
-  // unhandled: value intervals to place, sorted by (start, id) for determinism.
-  std::vector<LiveInterval const*> unhandled;
-  for (auto const& iv : intervals)
-    if (!iv.ranges.empty()) unhandled.push_back(&iv);
-  std::sort(unhandled.begin(), unhandled.end(), [](LiveInterval const* a, LiveInterval const* b) {
-    if (a->ranges.front().from != b->ranges.front().from)
-      return a->ranges.front().from < b->ranges.front().from;
-    return a->value.value < b->value.value;
+  // unhandled: value ids to place, sorted by (start, id) for determinism.
+  std::vector<ir::ValueId> unhandled;
+  for (auto v : intervals.ids())
+    if (!intervals[v].ranges.empty()) unhandled.push_back(v);
+  std::sort(unhandled.begin(), unhandled.end(), [&](ir::ValueId a, ir::ValueId b) {
+    auto const& ia = intervals[a];
+    auto const& ib = intervals[b];
+    if (ia.ranges.front().from != ib.ranges.front().from)
+      return ia.ranges.front().from < ib.ranges.front().from;
+    return a.value < b.value;
   });
 
   Allocation alloc;
@@ -661,19 +669,20 @@ auto allocate(ir::Function const& fn, Numbering const& n,
   std::vector<Active> inactive;
   for (std::size_t k = 0; k < kAllocatable.size(); ++k)
     if (!fixed_ranges[k].empty())
-      inactive.push_back(Active{&fixed_ranges[k], nullptr, ir::ValueId{}, kAllocatable[k], true});
+      inactive.push_back(Active{fixed_ranges[k], kAllocatable[k], std::nullopt});
 
-  for (auto const* cur : unhandled) {
-    Pos const position = cur->ranges.front().from;
-    Pos const cur_end  = cur->ranges.back().to;
+  for (auto cur_id : unhandled) {
+    auto const& cur = intervals[cur_id];
+    Pos const position = cur.ranges.front().from;
+    Pos const cur_end  = cur.ranges.back().to;
 
     // ── Advance the sets to `position` ──
     // active -> handled (ended) or inactive (fell into a hole).
     {
       std::vector<Active> keep;
       for (auto const& it : active) {
-        if (interval_end(*it.ranges) <= position) continue;            // handled
-        else if (!covers(*it.ranges, position)) inactive.push_back(it); // -> inactive
+        if (interval_end(it.ranges) <= position) continue;             // handled
+        else if (!covers(it.ranges, position)) inactive.push_back(it);  // -> inactive
         else keep.push_back(it);
       }
       active = std::move(keep);
@@ -682,8 +691,8 @@ auto allocate(ir::Function const& fn, Numbering const& n,
     {
       std::vector<Active> keep;
       for (auto const& it : inactive) {
-        if (interval_end(*it.ranges) <= position) continue;           // handled
-        else if (covers(*it.ranges, position)) active.push_back(it);  // -> active
+        if (interval_end(it.ranges) <= position) continue;            // handled
+        else if (covers(it.ranges, position)) active.push_back(it);   // -> active
         else keep.push_back(it);
       }
       inactive = std::move(keep);
@@ -697,7 +706,7 @@ auto allocate(ir::Function const& fn, Numbering const& n,
       if (k < free_until.size()) free_until[k] = 0;
     }
     for (auto const& it : inactive)                       // busy again at the next overlap
-      if (auto q = first_intersection(*it.ranges, cur->ranges)) {
+      if (auto q = first_intersection(it.ranges, cur.ranges)) {
         auto const k = pool_index(it.reg);
         if (k < free_until.size()) free_until[k] = std::min(free_until[k], *q);
       }
@@ -709,22 +718,22 @@ auto allocate(ir::Function const& fn, Numbering const& n,
 
     if (chosen < kAllocatable.size()) {
       x64::Gpr const reg = kAllocatable[chosen];
-      alloc.value_locs[cur->value] = Location{reg};
-      active.push_back(Active{&cur->ranges, &cur->uses, cur->value, reg, false});
+      alloc.value_locs[cur_id] = Location{reg};
+      active.push_back(Active{cur.ranges, reg, LiveValue{cur_id, cur.uses}});
       continue;
     }
 
     // ── ALLOCATEBLOCKEDREG: no register free -> spill (whole-interval Belady) ──
     // Per register, the soonest next use of a *value* blocking it; a register
     // blocked by a fixed interval cannot be evicted.
-    std::array<Pos, kAllocatable.size()>  next_use_at;  next_use_at.fill(kInf);
+    std::array<Pos, kAllocatable.size()>  next_use_at;   next_use_at.fill(kInf);
     std::array<bool, kAllocatable.size()> fixed_blocked; fixed_blocked.fill(false);
     auto account = [&](Active const& it) {
-      if (!first_intersection(*it.ranges, cur->ranges)) return;
+      if (!first_intersection(it.ranges, cur.ranges)) return;
       auto const k = pool_index(it.reg);
       if (k >= kAllocatable.size()) return;
-      if (it.fixed) fixed_blocked[k] = true;
-      else next_use_at[k] = std::min(next_use_at[k], next_use(*it.uses, position));
+      if (!it.live) fixed_blocked[k] = true;
+      else next_use_at[k] = std::min(next_use_at[k], next_use(it.live->uses, position));
     };
     for (auto const& it : active)   account(it);
     for (auto const& it : inactive) account(it);
@@ -740,10 +749,10 @@ auto allocate(ir::Function const& fn, Numbering const& n,
       }
     }
 
-    Pos const cur_next = next_use(cur->uses, position);
+    Pos const cur_next = next_use(cur.uses, position);
     if (victim_k == kAllocatable.size() || cur_next >= victim_next) {
       // `cur` itself is used furthest out (or nothing evictable) -> spill it.
-      alloc.value_locs[cur->value] = Location{SpillSlot{next_slot++}};
+      alloc.value_locs[cur_id] = Location{SpillSlot{next_slot++}};
     } else {
       // Evict the conflicting value(s) in the victim register to slots (drop
       // them from active/inactive), then give that register to `cur`.
@@ -751,8 +760,8 @@ auto allocate(ir::Function const& fn, Numbering const& n,
       auto evict = [&](std::vector<Active>& set) {
         std::vector<Active> keep;
         for (auto const& it : set) {
-          if (!it.fixed && it.reg == reg && first_intersection(*it.ranges, cur->ranges))
-            alloc.value_locs[it.value] = Location{SpillSlot{next_slot++}};
+          if (it.live && it.reg == reg && first_intersection(it.ranges, cur.ranges))
+            alloc.value_locs[it.live->value] = Location{SpillSlot{next_slot++}};
           else
             keep.push_back(it);
         }
@@ -760,8 +769,8 @@ auto allocate(ir::Function const& fn, Numbering const& n,
       };
       evict(active);
       evict(inactive);
-      alloc.value_locs[cur->value] = Location{reg};
-      active.push_back(Active{&cur->ranges, &cur->uses, cur->value, reg, false});
+      alloc.value_locs[cur_id] = Location{reg};
+      active.push_back(Active{cur.ranges, reg, LiveValue{cur_id, cur.uses}});
     }
   }
 
@@ -902,7 +911,7 @@ auto dump_resolution(ir::Function const& fn, Resolution const& res) -> std::stri
                        block_label(fn.blocks[e.to.value], e.to),
                        e.split ? " (split)" : "");
     for (auto const& m : e.moves) {
-      char const* op = (m.op == MoveOp::Mov) ? "mov" : "xchg";
+      std::string_view const op = (m.op == MoveOp::Mov) ? "mov" : "xchg";
       out += std::format("  {} {}, {}\n", op, loc_str(m.dst), loc_str(m.src));
     }
   }
