@@ -165,22 +165,12 @@ struct Allocation {
 // *parallel* assignment `param_i <- arg_i`; it is sequentialized so no
 // destination is clobbered before it is read, and register cycles are broken
 // with `xchg` (no scratch register reserved).
-// TODO(cleanup): Move is really a sum type — a move is *either* `dst <- src`
-// *or* `xchg a, b` — but it is modelled as a product with an op tag and two
-// double-purposed fields (dst/src are misnamed for the symmetric xchg case).
-// Replace with:
-//     struct MovOp  { Location dst; Location src; };  // dst <- src
-//     struct XchgOp { Location a;   Location b;   };   // swap a, b
-//     using Move = std::variant<MovOp, XchgOp>;
-// and dispatch with std::visit in sequentialize/dump_resolution/the emitter,
-// the same way Location was cleaned up.
-enum class MoveOp : std::uint8_t { Mov, Xchg };
-
-struct Move {
-  MoveOp   op;
-  Location dst;   // Mov: written; Xchg: one operand
-  Location src;   // Mov: read;    Xchg: other operand
-};
+//
+// A move is a sum type: either a directed copy or a symmetric swap.  (The two
+// operands of a swap are genuinely symmetric — not a dst/src pair.)
+struct MovOp  { Location dst; Location src; };  // dst <- src
+struct XchgOp { Location a;   Location b;   };  // swap a, b
+using Move = std::variant<MovOp, XchgOp>;
 
 struct EdgeMoves {
   ir::BlockId       from;
@@ -830,7 +820,7 @@ auto sequentialize(std::vector<std::pair<Location, Location>> pm) -> std::vector
     bool emitted = false;
     for (std::size_t i = 0; i < pm.size(); ++i) {
       if (!is_read(pm[i].first)) {
-        out.push_back(Move{MoveOp::Mov, pm[i].first, pm[i].second});
+        out.push_back(MovOp{pm[i].first, pm[i].second});
         pm.erase(pm.begin() + static_cast<std::ptrdiff_t>(i));
         emitted = true;
         break;
@@ -841,7 +831,7 @@ auto sequentialize(std::vector<std::pair<Location, Location>> pm) -> std::vector
     // Only cycles remain: break one with xchg.
     Location const d = pm.front().first;
     Location const s = pm.front().second;
-    out.push_back(Move{MoveOp::Xchg, d, s});
+    out.push_back(XchgOp{d, s});
     pm.erase(pm.begin());
     for (auto& m : pm) if (m.second == d) m.second = s;  // d's old value now in s
     drop_noops(pm);
@@ -910,10 +900,11 @@ auto dump_resolution(ir::Function const& fn, Resolution const& res) -> std::stri
                        block_label(fn.blocks[e.from.value], e.from),
                        block_label(fn.blocks[e.to.value], e.to),
                        e.split ? " (split)" : "");
-    for (auto const& m : e.moves) {
-      std::string_view const op = (m.op == MoveOp::Mov) ? "mov" : "xchg";
-      out += std::format("  {} {}, {}\n", op, loc_str(m.dst), loc_str(m.src));
-    }
+    for (auto const& m : e.moves)
+      out += std::visit(ir::overload{
+        [](MovOp const& mv)  { return std::format("  mov {}, {}\n",  loc_str(mv.dst), loc_str(mv.src)); },
+        [](XchgOp const& xc) { return std::format("  xchg {}, {}\n", loc_str(xc.a),   loc_str(xc.b)); },
+      }, m);
   }
   return out;
 }

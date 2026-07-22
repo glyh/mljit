@@ -85,29 +85,33 @@ struct Emitter {
     }, loc(v));
   }
 
-  // Emit one resolution/parallel move.  Dispatch on *both* operands at once:
-  // the four-way visit is exhaustive, so no register/slot combination is missed.
+  // Emit one resolution/parallel move.  The outer visit picks copy vs. swap;
+  // the inner visit dispatches on *both* operands at once, so every
+  // register/slot combination is handled exhaustively.
   void move(regalloc::Move const& m) {
     using regalloc::SpillSlot;
-    if (m.op == regalloc::MoveOp::Mov) {
-      std::visit(ir::overload{
-        [&](x64::Gpr d,  x64::Gpr s)  { a.mov_rr(d, s); },
-        [&](x64::Gpr d,  SpillSlot s) { a.mov_rm(d, slot_mem(s)); },
-        [&](SpillSlot d, x64::Gpr s)  { a.mov_mr(slot_mem(d), s); },
-        [&](SpillSlot d, SpillSlot s) { a.mov_rm(kScratch1, slot_mem(s));
-                                        a.mov_mr(slot_mem(d), kScratch1); },
-      }, m.dst, m.src);
-    } else {  // Xchg
-      std::visit(ir::overload{
-        [&](x64::Gpr d,  x64::Gpr s)  { a.xchg_rr(d, s); },
-        [&](x64::Gpr d,  SpillSlot s) { swap_reg_slot(d, s); },
-        [&](SpillSlot d, x64::Gpr s)  { swap_reg_slot(s, d); },
-        [&](SpillSlot d, SpillSlot s) { a.mov_rm(kScratch1, slot_mem(d));
-                                        a.mov_rm(kScratch2, slot_mem(s));
-                                        a.mov_mr(slot_mem(d), kScratch2);
-                                        a.mov_mr(slot_mem(s), kScratch1); },
-      }, m.dst, m.src);
-    }
+    std::visit(ir::overload{
+      [&](regalloc::MovOp const& mv) {
+        std::visit(ir::overload{
+          [&](x64::Gpr d,  x64::Gpr s)  { a.mov_rr(d, s); },
+          [&](x64::Gpr d,  SpillSlot s) { a.mov_rm(d, slot_mem(s)); },
+          [&](SpillSlot d, x64::Gpr s)  { a.mov_mr(slot_mem(d), s); },
+          [&](SpillSlot d, SpillSlot s) { a.mov_rm(kScratch1, slot_mem(s));
+                                          a.mov_mr(slot_mem(d), kScratch1); },
+        }, mv.dst, mv.src);
+      },
+      [&](regalloc::XchgOp const& xc) {
+        std::visit(ir::overload{
+          [&](x64::Gpr a1, x64::Gpr b1) { a.xchg_rr(a1, b1); },
+          [&](x64::Gpr a1, SpillSlot b1){ swap_reg_slot(a1, b1); },
+          [&](SpillSlot a1, x64::Gpr b1){ swap_reg_slot(b1, a1); },
+          [&](SpillSlot a1, SpillSlot b1){ a.mov_rm(kScratch1, slot_mem(a1));
+                                           a.mov_rm(kScratch2, slot_mem(b1));
+                                           a.mov_mr(slot_mem(a1), kScratch2);
+                                           a.mov_mr(slot_mem(b1), kScratch1); },
+        }, xc.a, xc.b);
+      },
+    }, m);
   }
 
   void swap_reg_slot(x64::Gpr reg, regalloc::SpillSlot slot) {
