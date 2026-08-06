@@ -340,6 +340,107 @@ TEST_CASE("idiv and irem snapshot", "[ir]") {
   CHECK(text == expected);
 }
 
+// ── Canonical spec examples: gcd and fib ───────────────────
+//
+// These two dumps are the reference examples in docs/ir-format.md; the spec
+// quotes them verbatim.  If the format changes, update the spec together with
+// these snapshots.
+
+TEST_CASE("gcd spec-example snapshot", "[ir][spec]") {
+  ModuleBuilder mb;
+  auto fid = mb.create_function({Type::i64, Type::i64}, Type::i64, "gcd");
+  auto fb = mb.function_builder(fid);
+  auto entry = fb.entry_block();
+  auto a = fb.param_id(entry, 0);
+  auto b = fb.param_id(entry, 1);
+
+  auto zero = fb.const_i64(entry, 0);
+  auto cond = fb.icmp(entry, IcmpCond::eq, b, zero);
+  auto base = fb.append_block({Type::i64}, "base");
+  auto loop = fb.append_block({Type::i64, Type::i64}, "loop");
+  fb.branch(entry, cond, base, {a}, loop, {a, b});
+
+  auto base_r = fb.param_id(base, 0);
+  fb.ret(base, base_r);
+
+  auto a2 = fb.param_id(loop, 0);
+  auto b2 = fb.param_id(loop, 1);
+  auto rem = fb.irem(loop, a2, b2);
+  auto zero2 = fb.const_i64(loop, 0);
+  auto cond2 = fb.icmp(loop, IcmpCond::eq, rem, zero2);
+  fb.branch(loop, cond2, base, {b2}, loop, {b2, rem});
+
+  auto mod  = mb.finish();
+  auto text = printer::to_text(mod);
+
+  auto expected =
+    "func @gcd(i64, i64) -> i64 {\n"
+    "^entry(v0: i64, v1: i64):\n"
+    "  v2: i64 = const_i64 0\n"
+    "  v3: i1 = icmp eq v1, v2\n"
+    "  branch v3, ^base(v0), ^loop(v0, v1)\n"
+    "^base(v4: i64):\n"
+    "  ret v4\n"
+    "^loop(v5: i64, v6: i64):\n"
+    "  v7: i64 = irem v5, v6\n"
+    "  v8: i64 = const_i64 0\n"
+    "  v9: i1 = icmp eq v7, v8\n"
+    "  branch v9, ^base(v6), ^loop(v6, v7)\n"
+    "}\n";
+
+  CHECK(text == expected);
+}
+
+TEST_CASE("fib spec-example snapshot", "[ir][spec]") {
+  ModuleBuilder mb;
+  auto fib = mb.create_function({Type::i64}, Type::i64, "fib");
+  auto fb = mb.function_builder(fib);
+  auto entry = fb.entry_block();
+  auto n = fb.param_id(entry, 0);
+
+  auto two = fb.const_i64(entry, 2);
+  auto cond = fb.icmp(entry, IcmpCond::slt, n, two);
+  auto base = fb.append_block({Type::i64}, "base");
+  auto recur = fb.append_block({}, "recur");
+  fb.branch(entry, cond, base, {n}, recur, {});
+
+  auto base_n = fb.param_id(base, 0);
+  fb.ret(base, base_n);
+
+  auto one = fb.const_i64(recur, 1);
+  auto n1 = fb.isub(recur, n, one);
+  auto x = fb.call(recur, fib, {n1});
+  auto two_r = fb.const_i64(recur, 2);
+  auto n2 = fb.isub(recur, n, two_r);
+  auto y = fb.call(recur, fib, {n2});
+  auto result = fb.iadd(recur, x, y);
+  fb.ret(recur, result);
+
+  auto mod  = mb.finish();
+  auto text = printer::to_text(mod);
+
+  auto expected =
+    "func @fib(i64) -> i64 {\n"
+    "^entry(v0: i64):\n"
+    "  v1: i64 = const_i64 2\n"
+    "  v2: i1 = icmp slt v0, v1\n"
+    "  branch v2, ^base(v0), ^recur()\n"
+    "^base(v3: i64):\n"
+    "  ret v3\n"
+    "^recur():\n"
+    "  v4: i64 = const_i64 1\n"
+    "  v5: i64 = isub v0, v4\n"
+    "  v6: i64 = call @fib(v5)\n"
+    "  v7: i64 = const_i64 2\n"
+    "  v8: i64 = isub v0, v7\n"
+    "  v9: i64 = call @fib(v8)\n"
+    "  v10: i64 = iadd v6, v9\n"
+    "  ret v10\n"
+    "}\n";
+
+  CHECK(text == expected);
+}
+
 // ── empty module edge case ──────────────────────────────────
 
 TEST_CASE("empty module dump", "[ir]") {
