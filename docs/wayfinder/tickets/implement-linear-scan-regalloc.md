@@ -3,7 +3,8 @@ title: Implement Linear Scan Register Allocation
 parent: ../mljit-design-map.md
 labels:
   - wayfinder:task
-status: open
+status: closed
+closed_date: 2026-08-06
 assignee: glyh
 blocked_by:
   - design-linear-scan-regalloc.md
@@ -39,7 +40,7 @@ Deliverables:
 2. The scan: free-register selection, fixed intervals. — **done** (`2ae7453`)
 3. Move resolution + `xchg_rr` in `mljit.x64`. — **done** (`7ab99bd`)
 4. Register spilling + consolidated `--emit-regalloc` dump + pressure generator + invariant
-   test battery. — pending.
+   test battery. — **done** (`38a1108`, `81ef02e`, `596b6c3`)
 
 ## Implementation notes and deviations from the design
 
@@ -77,3 +78,34 @@ A frame-based prologue reserves the callee-saved saves plus spill slots with one
 `sub rsp`. Verified by a high-pressure differential test (up to 30 live values) matching the
 interpreter. **spill-by-split** remains the deferred quality refinement (map Fog): it would
 reclaim the two scratch registers and avoid whole-interval memory traffic.
+
+## Resolution
+
+All four slices are implemented and tested (107/107 passing). Final state:
+
+- `mljit.regalloc` (`src/regalloc.cppm`): pure `(ir::Function) -> Numbering / IntervalSet /
+  Allocation / Resolution` pipeline, SSA untouched. RPO even-numbered program points,
+  backward interval construction with holes and loop extension, Wimmer-Franz
+  active/inactive scan with fixed intervals for the genuine clobbers (idiv rax/rdx,
+  caller-saved across call), whole-interval Belady spilling with one 8-byte slot per
+  spilled value.
+- Register model deviation from the design: **12 allocatable** registers, not 14 —
+  `r10`/`r11` are reserved as emission scratch for reloading spilled operands (chosen
+  over spill-by-split for v1); args/return/call-args use emission-time ABI moves rather
+  than fixed-interval pinning.
+- Move resolution: topological parallel-move sequencing, `xchg_rr` cycle breaking,
+  critical-edge split marking; `sequentialize_parallel_moves` exported for the emitter.
+- `mljit.codegen` emission resolves every operand through the allocation (direct
+  register, scratch reload, scratch-compute-then-store), with a 16-aligned frame
+  covering callee-saved saves plus spill slots.
+- Consolidated deterministic 4-section dump `dump_regalloc(fn)` — intervals over
+  numbered lines, allocation, spills + frame, resolution moves — the `--emit-regalloc`
+  view (`596b6c3`). Wiring it to an actual CLI flag belongs to
+  [Define the Phase-Dump CLI Contract](define-phase-dump-cli-contract.md).
+- Tests: golden dumps for every stage plus the consolidated view, reusable structural
+  invariants, `make_pressure_fn(N)` sweeps across the 12-register threshold, and a
+  high-pressure interpreter-vs-native differential test (up to 30 live values).
+
+Deferred quality refinements stay recorded in the map Fog: spill-by-split (reclaims the
+two scratch registers), stack-slot reuse, freeing rbp, callee-saved preference, and
+arg/return register pinning.
