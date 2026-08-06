@@ -361,6 +361,81 @@ TEST_CASE("numbering: gcd (loop / back-edge)", "[regalloc][numbering]") {
   CHECK(regalloc::dump_resolution(fn, reso) == expected_res);
 }
 
+// The consolidated `--emit-regalloc` view: all four sections, verbatim, on the
+// swap_loop function from the resolution test (it exercises a split edge and an
+// xchg cycle, and spills nothing).
+TEST_CASE("dump: consolidated --emit-regalloc view", "[regalloc][dump]") {
+  ir::ModuleBuilder mb;
+  auto fid = mb.create_function({ir::Type::i64, ir::Type::i64}, ir::Type::i64, "swap_loop");
+  auto fb  = mb.function_builder(fid);
+
+  auto entry = fb.entry_block();
+  auto x = fb.param_id(entry, 0);
+  auto y = fb.param_id(entry, 1);
+  auto loop = fb.append_block({ir::Type::i64, ir::Type::i64}, "loop");
+  auto exit = fb.append_block({ir::Type::i64}, "exit");
+
+  fb.jump(entry, loop, {x, y});
+
+  auto a = fb.param_id(loop, 0);
+  auto b = fb.param_id(loop, 1);
+  auto z = fb.const_i64(loop, 0, "z");
+  auto c = fb.icmp(loop, ir::IcmpCond::eq, a, z, "c");
+  fb.branch(loop, c, exit, {a}, loop, {b, a});
+
+  auto r = fb.param_id(exit, 0);
+  fb.ret(exit, r);
+
+  auto mod = mb.finish();
+  auto const& fn = mod.functions[fid.value];
+
+  std::string const expected =
+    "== intervals ==\n"
+    "^entry [0..4):\n"
+    "  0: block-entry(v0, v1)\n"
+    "  2: term jump\n"
+    "^loop [4..12):\n"
+    "  4: block-entry(v2, v3)\n"
+    "  6: z = const_i64\n"
+    "  8: c = icmp\n"
+    "  10: term branch\n"
+    "^exit [12..16):\n"
+    "  12: block-entry(v4)\n"
+    "  14: term ret\n"
+    "v0: [0..3) uses 2\n"
+    "v1: [0..3) uses 2\n"
+    "v2: [4..11) uses 8,10\n"
+    "v3: [4..11) uses 10\n"
+    "v4: [12..15) uses 14\n"
+    "v5: [6..9) uses 8\n"
+    "v6: [8..11) uses 10\n"
+    "== allocation ==\n"
+    "v0: rcx\n"
+    "v1: rsi\n"
+    "v2: rcx\n"
+    "v3: rsi\n"
+    "v4: rcx\n"
+    "v5: rdi\n"
+    "v6: r8\n"
+    "== spills ==\n"
+    "frame: 0 spill slots\n"
+    "== resolution ==\n"
+    "edge ^loop -> ^loop (split):\n"
+    "  xchg rcx, rsi\n";
+  CHECK(regalloc::dump_regalloc(fn) == expected);
+}
+
+// Under pressure, the spills section lists each spilled value's slot and the
+// frame line reports the slot count.
+TEST_CASE("dump: spills section under pressure", "[regalloc][dump][pressure]") {
+  auto mod = make_pressure_fn(15);
+  auto const& fn = mod.functions[0];
+
+  auto dump = regalloc::dump_regalloc(fn);
+  CHECK(dump.contains(": slot 0\n"));
+  CHECK_FALSE(dump.contains("frame: 0 spill slots\n"));
+}
+
 // Register pressure: below the 14-register file everyone gets a register;
 // above it, the allocator spills — and every allocation stays structurally
 // valid (no overlapping values share a register, spill slots are distinct).

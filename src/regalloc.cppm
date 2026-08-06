@@ -194,6 +194,14 @@ struct Resolution {
 [[nodiscard]] auto sequentialize_parallel_moves(
     std::vector<std::pair<Location, Location>> parallel) -> std::vector<Move>;
 
+// ── Consolidated dump ─────────────────────────────────────────
+//
+// The `--emit-regalloc` view: runs the whole allocation pipeline on `fn` and
+// renders its four sections — (1) live intervals over the numbered instruction
+// lines, (2) final assignments, (3) spills + frame, (4) resolution moves per
+// edge.  Deterministic, so snapshot tests may compare it verbatim.
+[[nodiscard]] auto dump_regalloc(ir::Function const& fn) -> std::string;
+
 }  // namespace mljit::regalloc
 
 // ═══════════════════════════════════════════════════════════════
@@ -906,6 +914,29 @@ auto dump_resolution(ir::Function const& fn, Resolution const& res) -> std::stri
         [](XchgOp const& xc) { return std::format("  xchg {}, {}\n", loc_str(xc.a),   loc_str(xc.b)); },
       }, m);
   }
+  return out;
+}
+
+auto dump_regalloc(ir::Function const& fn) -> std::string {
+  auto const n     = compute_numbering(fn);
+  auto const iv    = build_intervals(fn, n);
+  auto const alloc = allocate(fn, n, iv);
+  auto const res   = resolve(fn, n, alloc);
+
+  std::string out;
+  out += "== intervals ==\n";
+  out += dump_numbering(fn, n);
+  out += dump_intervals(iv);
+  out += "== allocation ==\n";
+  out += dump_allocation(alloc);
+  out += "== spills ==\n";
+  for (auto v : alloc.value_locs.ids())
+    if (auto const& loc = alloc.value_locs[v])
+      if (auto const* s = std::get_if<SpillSlot>(&*loc))
+        out += std::format("{}: slot {}\n", v, s->index);
+  out += std::format("frame: {} spill slots\n", alloc.num_spill_slots);
+  out += "== resolution ==\n";
+  out += dump_resolution(fn, res);
   return out;
 }
 
