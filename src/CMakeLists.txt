@@ -15,6 +15,7 @@ target_sources(mljit-lib
         x64.cppm
         regalloc.cppm
         codegen.cppm
+        driver.cppm
 )
 
 target_compile_features(mljit-lib PUBLIC cxx_std_26)

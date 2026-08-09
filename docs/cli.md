@@ -78,6 +78,11 @@ Phase vocabulary:
 - There is deliberately **no `mir` phase**: MLJIT has no materialized
   machine IR (see the Transient Machine IR Boundary decision); `regalloc`
   *is* the machine-level view.
+- `dump` covers the whole module. `ssa` is already a module view; `regalloc`
+  is per function, so when a module holds more than one function each
+  function's dump is preceded by a `;; @<name>` line. A single-function
+  module dumps verbatim — framing lines appear only where something needs
+  disambiguating.
 - Unknown phase names are usage errors (exit 2) listing the valid set.
 - The CLI emits the underlying printers' output verbatim, so the existing
   golden tests for those printers double as CLI-output tests.
