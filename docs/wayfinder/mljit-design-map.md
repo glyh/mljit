@@ -50,9 +50,14 @@ numbering -> live intervals -> linear-scan allocation -> move resolution -> dire
 x64 emission -> mmap'd executable. Both benchmark-demo functions compile to native
 machine code and match the SSA interpreter across inputs: iterative gcd (loop,
 block-parameter moves, irem) and recursive fib (self-calls, callee-saved registers,
-stack alignment). Everything project-owned — no LLVM, no asmjit. Remaining v1 gaps:
-register spilling (allocator asserts past 14 live), cross-function calls, and the
-i1-as-value / isub-scratch emission refinements. -->
+stack alignment). Everything project-owned — no LLVM, no asmjit. -->
+
+<!-- MILESTONE (2026-08-09): the CLI driver ships, so the pipeline is drivable from
+a source file end to end (`run`/`dump`/`check`). Register spilling landed with the
+allocator. Remaining v1 gaps: cross-function calls (design settled, implementation
+pending) and the i1-as-value emission refinement — both now surface as clean
+`error: jit: unsupported ...` diagnostics with an interpreter fallback rather than
+asserts. -->
 
 - [Update PROJECT.md for the New Design Direction](tickets/update-project-spec-for-new-design.md) — replaced stale `PROJECT.md` with a short backend-first `README.md` that states current status and links to the design map.
 - [Plan vcpkg and Catch2 Integration](tickets/plan-vcpkg-catch2-integration.md) — added `vcpkg.json` manifest, wired Catch2 v3 + CTest discovery, and verified with 3/3 passing smoke tests. **Superseded:** Nix now supplies all dependencies; vcpkg has been dropped.
@@ -68,6 +73,7 @@ i1-as-value / isub-scratch emission refinements. -->
 - [Specify the Textual SSA IR Format](tickets/specify-textual-ssa-ir-format.md) — codified the existing printer syntax as [docs/ir-format.md](../ir-format.md): line-oriented deterministic dumps, `@func`/`^block`/bare-value sigils, block-parameter SSA with mandatory branch-arg parens, full EBNF, a snapshot-stability contract, and verbatim fib/gcd examples pinned by `[ir][spec]` golden tests.
 - [Define the Phase-Dump CLI Contract](tickets/define-phase-dump-cli-contract.md) — codified as [docs/cli.md](../cli.md): subcommand style with exactly `run`/`dump`/`check`/`bench`; repeatable `--phase=ssa|regalloc` (+ reserved `x64`, never `mir`); `--backend=jit|interp` **defaulting to `jit`** with clean `error: jit:` diagnostics instead of silent fallback; `--entry` + positional i64 args; GCC-style stderr diagnostics with 0/1/2 exit codes; both-backend `bench` with a result-equality gate; and explicit byte-/field-/unstable/reserved stability tiers (`--trace*` reserved for the trace-events ticket).
 - [Implement the mljit CLI Driver](tickets/implement-cli-driver.md) — shipped `run`/`dump`/`check` as a new `mljit.driver` module (`src/driver.cppm`), leaving `main.cpp` a 17-line shell: hand-rolled verb/flag dispatch with positionals after the file operand (so negative i64 args parse), file and `-`/stdin input, phase dumps emitted verbatim, and GCC-style stderr diagnostics on 0/1/2 exit codes. `driver::run` writes into caller-owned strings and reads an injected `istream`, so all 30 new `[cli]` tests run in process (suite 109 → 139). The four `codegen` assert sites became a pre-emission `jit_gap` scan reporting `error: jit: unsupported ...; try --backend=interp`; `bench` is rejected as unimplemented.
+- [Design Module-Level JIT Compilation (Cross-Function Calls)](tickets/design-module-level-jit-compilation.md) — settled: **one `Assembler`/`ExecBuffer` per module**, **eager whole-module** compilation in declaration order, and cross-function calls lowered as the **shortest encoding — `call rel32`** (5 bytes, no register cost, no indirection). Needs no new machinery: the existing intra-function `Label`/`Fixup` rel32 system is promoted from function to module lifetime, so mutual recursion resolves through the normal forward-fixup path and `finalize()` still asserts every fixup bound. Eager is forced by the [CLI contract](../cli.md)'s promise of an up-front `error: jit: unsupported ...` — a lazy stub design would surface gaps mid-execution. `codegen::compile(mod, fid)` becomes a module-level entry point returning a `CompiledModule` owning the buffer plus a `FunctionId -> offset` table. **Accepted constraint:** rel32's ±2GB reach is sound only because every target shares one buffer, so host/runtime-helper calls and per-function recompilation/tiering are out of reach until a second call kind lands — deferred to [Support Out-of-Range and Host Call Targets](tickets/support-out-of-range-call-targets.md), with the driver itself in [Implement Module-Level Compilation](tickets/implement-module-level-compilation.md).
 
 ## Fog
 - A textual-IR **parser** (round-tripping [docs/ir-format.md](../ir-format.md) back into `ir::Module`) is deferred until something needs IR-as-input — e.g. file-based test fixtures or a `--run-ir` CLI mode; the grammar was designed unambiguous so this stays possible.
