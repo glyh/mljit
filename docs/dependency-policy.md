@@ -38,7 +38,7 @@ Dependency checks should answer:
 2. Is it available through Nix/nixpkgs?
 3. Does it preserve C++ modules/CMake simplicity?
 4. Is it cheaper and safer than a small local implementation?
-5. Does it improve the project signal, or obscure the compiler/JIT work behind a library?
+5. Does it keep the compiler/JIT work visible, or obscure it behind a library?
 
 ## Current accepted dependencies
 
@@ -94,10 +94,10 @@ Reconsider Perfetto or Tracy only if MLJIT needs professional timeline/profiling
 
 Status: rejected for project goals.
 
-MLJIT should build a project-owned x64 assembler layer. This is part of the systems/JIT signal and should not be replaced by asmjit-style abstractions unless the project direction changes.
+MLJIT should build a project-owned x64 assembler layer. This is core to the project's systems/JIT focus and should not be replaced by asmjit-style abstractions unless the project direction changes.
 
 ### LLVM backend
 
 Status: rejected for project goals.
 
-LLVM would hide the backend work MLJIT is intended to demonstrate. It may be useful as an external comparison point later, but not as the primary backend.
+LLVM would hide the backend work this project is about. It may be useful as an external comparison point later, but not as the primary backend.

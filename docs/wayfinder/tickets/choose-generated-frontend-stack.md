@@ -31,7 +31,7 @@ This is an explicit dependency-policy exception: ANTLR4 types are allowed only i
 Rationale:
 
 - ANTLR4 keeps the grammar explicit and reviewable while avoiding a hand-written parser detour.
-- The frontend is intentionally small and not the project's core signal; a scoped generated parser keeps iteration cheap.
+- The frontend is intentionally small and not where the project's interesting work is; a scoped generated parser keeps iteration cheap.
 - Keeping the generated-parser dependency isolated prevents the frontend stack from shaping the compiler core.
 
 ## Module Architecture

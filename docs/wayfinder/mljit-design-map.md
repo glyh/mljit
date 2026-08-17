@@ -9,7 +9,7 @@ status: open
 
 ## Notes
 
-Domain: MLJIT is a hobby compiler/JIT project. Its primary signal is systems/JIT engineering plus modern C++ engineering, not broad language UX or deep type-theory novelty.
+Domain: MLJIT is a hobby compiler/JIT project. Its focus is systems/JIT engineering and modern C++ engineering, not broad language UX or deep type-theory novelty.
 
 Skills every session should consult when relevant:
 
@@ -30,7 +30,7 @@ Standing preferences and constraints for this effort:
 - Start with first-order functions only; add closures after the register backend works.
 - Use block-parameter SSA from day one.
 - First native backend is i64-only: arithmetic, comparisons, block jumps/branches with block parameters, first-order fixed-arity calls, and i64 returns.
-- First wow demo should include recursive Fibonacci and iterative GCD for interpreter-vs-native benchmarking.
+- The first demo should include recursive Fibonacci and iterative GCD for interpreter-vs-native benchmarking.
 - Documentation should be architecture-heavy: README, design notes, IR spec, and JIT/codegen notes.
 - Milestone 1 is the SSA IR package: data model, textual dump format, verifier, i64 interpreter, and hand-built fib/gcd IR tests; no x86 yet.
 - Prefer value semantics and strongly typed IDs for the canonical IR, with controlled mutable/ref-like backend artifacts later.

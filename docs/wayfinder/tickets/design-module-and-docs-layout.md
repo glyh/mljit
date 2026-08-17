@@ -12,6 +12,6 @@ blocked_by: []
 
 ## Question
 
-What source-module layout and documentation layout should make MLJIT's systems/JIT and modern C++ engineering obvious to a reviewer within a few minutes?
+What source-module layout and documentation layout should make MLJIT's systems/JIT and modern C++ engineering easy to navigate?
 
 The answer should propose C++26 module boundaries, source directory structure, test directory structure, README outline, `docs/design.md`, `docs/ir.md`, `docs/jit.md`, and how phase-dump examples should be presented without over-documenting unfinished features.
