@@ -348,19 +348,25 @@ struct Source {
 // ── JIT capability scan ─────────────────────────────────────
 //
 // The x64 emitter asserts on constructs it cannot lower yet. The contract
-// requires a clean diagnostic instead, so scan the function first and report
-// the first gap found. This detects gaps; it does not close them.
+// requires a clean diagnostic instead, so scan first and report the first gap
+// found. This detects gaps; it does not close them.
+//
+// The scan is whole-module because compilation is: every function is emitted
+// into the module's shared buffer before anything runs, so a gap anywhere must
+// surface before `run` produces output, not part-way through execution.
 
 // System V passes at most 6 integer arguments in registers, which is all the
 // emitter's ABI lowering knows.
 constexpr std::size_t kMaxAbiArgs = 6;
 
-[[nodiscard]] auto jit_gap(ir::Module const& mod, ir::FunctionId fid) -> std::optional<std::string> {
+[[nodiscard]] auto function_jit_gap(ir::Module const& mod, ir::FunctionId fid)
+    -> std::optional<std::string> {
   auto const& fn = mod.functions[fid.value];
+  auto const self = func_label(mod, fid);
 
-  if (fn.blocks.empty()) return std::string("function without an entry block");
+  if (fn.blocks.empty()) return std::format("function @{} without an entry block", self);
   if (fn.blocks[0].params.size() > kMaxAbiArgs)
-    return std::format("function with more than {} parameters", kMaxAbiArgs);
+    return std::format("function @{} with more than {} parameters", self, kMaxAbiArgs);
 
   // Defining instruction per value; block parameters map to nullptr.
   std::vector<ir::Instruction const*> def(fn.next_value_id, nullptr);
@@ -378,9 +384,9 @@ constexpr std::size_t kMaxAbiArgs = 6;
   auto check_operands = [&](std::string_view what, std::initializer_list<ir::ValueId> vs) {
     for (auto v : vs)
       if (is_i1(v))
-        report(std::format("i1 value used as an operand of {} "
+        report(std::format("i1 value used as an operand of {} in @{} "
                            "(an icmp result can only feed a branch)",
-                           what));
+                           what, self));
   };
 
   for (auto const& inst : fn.instructions) {
@@ -392,12 +398,9 @@ constexpr std::size_t kMaxAbiArgs = 6;
       [&](ir::IRem const& o) { check_operands("irem", {o.lhs, o.rhs}); },
       [&](ir::ICmp const& o) { check_operands("icmp", {o.lhs, o.rhs}); },
       [&](ir::Call const& o) {
-        if (o.callee != fid)
-          report(std::format("cross-function call to @{} "
-                             "(only self-recursive calls are lowered)",
-                             func_label(mod, o.callee)));
         if (o.args.size() > kMaxAbiArgs)
-          report(std::format("call with more than {} arguments", kMaxAbiArgs));
+          report(std::format("call to @{} in @{} with more than {} arguments",
+                             func_label(mod, o.callee), self, kMaxAbiArgs));
         for (auto v : o.args) check_operands("a call", {v});
       },
       [&](ir::ConstI64 const&) {},
@@ -419,8 +422,9 @@ constexpr std::size_t kMaxAbiArgs = 6;
             !blk.instructions.empty() &&
             fn.instructions[blk.instructions.back().value].result_id == t.cond && is_i1(t.cond);
         if (!fusable)
-          report(std::format("branch in ^{} whose condition is not the immediately "
+          report(std::format("branch in @{}/^{} whose condition is not the immediately "
                              "preceding icmp (an i1 value cannot be materialized yet)",
+                             self,
                              block_label(fn, ir::BlockId{static_cast<std::uint32_t>(bi)})));
       },
     }, *blk.terminator);
@@ -429,16 +433,23 @@ constexpr std::size_t kMaxAbiArgs = 6;
   return gap;
 }
 
-[[nodiscard]] auto invoke_jit(x64::ExecBuffer const& buf, std::vector<std::int64_t> const& a)
-    -> std::int64_t {
+// The first gap in the module, scanning functions in declaration order.
+[[nodiscard]] auto jit_gap(ir::Module const& mod) -> std::optional<std::string> {
+  for (std::uint32_t i = 0; i < mod.functions.size(); ++i)
+    if (auto gap = function_jit_gap(mod, ir::FunctionId{i})) return gap;
+  return std::nullopt;
+}
+
+[[nodiscard]] auto invoke_jit(codegen::CompiledModule const& code, ir::FunctionId fid,
+                              std::vector<std::int64_t> const& a) -> std::int64_t {
   switch (a.size()) {
-    case 0: return buf.invoke<std::int64_t>();
-    case 1: return buf.invoke<std::int64_t>(a[0]);
-    case 2: return buf.invoke<std::int64_t>(a[0], a[1]);
-    case 3: return buf.invoke<std::int64_t>(a[0], a[1], a[2]);
-    case 4: return buf.invoke<std::int64_t>(a[0], a[1], a[2], a[3]);
-    case 5: return buf.invoke<std::int64_t>(a[0], a[1], a[2], a[3], a[4]);
-    default: return buf.invoke<std::int64_t>(a[0], a[1], a[2], a[3], a[4], a[5]);
+    case 0: return code.invoke<std::int64_t>(fid);
+    case 1: return code.invoke<std::int64_t>(fid, a[0]);
+    case 2: return code.invoke<std::int64_t>(fid, a[0], a[1]);
+    case 3: return code.invoke<std::int64_t>(fid, a[0], a[1], a[2]);
+    case 4: return code.invoke<std::int64_t>(fid, a[0], a[1], a[2], a[3]);
+    case 5: return code.invoke<std::int64_t>(fid, a[0], a[1], a[2], a[3], a[4]);
+    default: return code.invoke<std::int64_t>(fid, a[0], a[1], a[2], a[3], a[4], a[5]);
   }
 }
 
@@ -504,13 +515,13 @@ constexpr std::size_t kMaxAbiArgs = 6;
     return ExitCode::Ok;
   }
 
-  if (auto const gap = jit_gap(*mod, *fid)) {
+  if (auto const gap = jit_gap(*mod)) {
     err += std::format("{}: error: jit: unsupported {}; try --backend=interp\n", src.name, *gap);
     return ExitCode::ProgramError;
   }
 
-  auto const buf = codegen::compile(*mod, *fid);
-  out += std::format("{}\n", invoke_jit(buf, inv.arguments));
+  auto const code = codegen::compile(*mod);
+  out += std::format("{}\n", invoke_jit(code, *fid, inv.arguments));
   return ExitCode::Ok;
 }
 

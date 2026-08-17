@@ -51,7 +51,9 @@ Compile and execute one function, print its result.
 - **Backend**: `--backend=jit` (**default**) or `--backend=interp`. There is
   no silent fallback: if the JIT does not yet support a construct the
   program uses, `run` fails with a diagnostic prefixed `error: jit:` naming
-  the construct and suggesting `--backend=interp` (exit 1). The default is
+  the construct and suggesting `--backend=interp` (exit 1). The JIT compiles
+  the **whole module** eagerly, so the gap may be in a function the entry
+  point never calls; the diagnostic names the function. The default is
   stable; going native by default is the point of the project.
 - **Output**: the returned i64 on stdout as a bare decimal line — nothing
   else on stdout. Exit code 0 on success; the return *value* is never the

@@ -70,13 +70,23 @@ public:
     return reinterpret_cast<Fn*>(ptr_);
   }
 
-  // Call JIT code at ptr_ returning T. Per-function no_sanitize
-  // keeps UBSan active everywhere else while suppressing the false
-  // positive on the JIT buffer (UBSan can't type-check mmap'd code).
+  // Call JIT code at `offset` bytes into the buffer, returning T. A module
+  // shares one buffer across all its functions, so an entry point is a byte
+  // offset rather than the buffer's base. Per-function no_sanitize keeps
+  // UBSan active everywhere else while suppressing the false positive on the
+  // JIT buffer (UBSan can't type-check mmap'd code).
   template <typename T, typename... Args>
   __attribute__((no_sanitize("function")))
+  auto invoke_at(std::size_t offset, Args... args) const noexcept -> T {
+    assert(offset < size_ && "entry offset outside the code buffer");
+    auto* const entry = static_cast<std::uint8_t*>(ptr_) + offset;
+    return reinterpret_cast<T (*)(Args...)>(entry)(args...);
+  }
+
+  // Call the code at the start of the buffer.
+  template <typename T, typename... Args>
   auto invoke(Args... args) const noexcept -> T {
-    return reinterpret_cast<T (*)(Args...)>(ptr_)(args...);
+    return invoke_at<T, Args...>(0, args...);
   }
 
 private:

@@ -1,5 +1,6 @@
 module;
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 #include <array>
@@ -15,11 +16,41 @@ import mljit.regalloc;
 
 export namespace mljit::codegen {
 
-// Compile one function to executable machine code by direct emission: run the
-// register-allocation pipeline, then fold over the SSA in linear order,
-// streaming x64 into a code buffer.  (v1: only self-recursive calls —
-// cross-function calls need resolved addresses, a later step.)
-[[nodiscard]] auto compile(ir::Module const& mod, ir::FunctionId fid) -> x64::ExecBuffer;
+// A whole module's machine code: one executable buffer holding every function,
+// plus where each function's prologue starts within it.  Co-location is what
+// makes the 5-byte `call rel32` at every call site sound, so the buffer and the
+// offset table are deliberately owned together.
+class CompiledModule {
+public:
+  CompiledModule() = default;
+  CompiledModule(x64::ExecBuffer code, std::vector<std::size_t> entry_offsets)
+    : code_(std::move(code)), entry_offsets_(std::move(entry_offsets)) {}
+
+  // Byte offset of a function's entry point within the buffer.
+  [[nodiscard]] auto entry_offset(ir::FunctionId fid) const -> std::size_t {
+    return entry_offsets_.at(fid.value);
+  }
+
+  [[nodiscard]] auto code() const -> x64::ExecBuffer const& { return code_; }
+
+  // Call a function of this module with System V integer arguments.
+  template <typename T, typename... Args>
+  auto invoke(ir::FunctionId fid, Args... args) const -> T {
+    return code_.invoke_at<T, Args...>(entry_offset(fid), args...);
+  }
+
+private:
+  x64::ExecBuffer          code_;
+  std::vector<std::size_t> entry_offsets_;   // indexed by FunctionId
+};
+
+// Compile a whole module to executable machine code by direct emission: for each
+// function run the register-allocation pipeline, then fold over its SSA in
+// linear order, streaming x64 into one shared code buffer.  Functions are
+// emitted in declaration order (for deterministic output only); a call site
+// targets the callee's label, so forward references and mutual recursion
+// resolve through the assembler's existing rel32 fixups.
+[[nodiscard]] auto compile(ir::Module const& mod) -> CompiledModule;
 
 }  // namespace mljit::codegen
 
@@ -178,17 +209,17 @@ struct Emitter {
     }, inst.payload);
   }
 
-  // Self-recursive call: args into ABI registers, call the entry, result from
-  // rax. Values live across the call sit in callee-saved registers or slots
-  // (both survive the call), kept out of caller-saved by fixed intervals.
-  void call(ir::FunctionId self, x64::Label entry_label,
-            ir::Instruction const& inst, ir::Call const& c) {
-    assert(c.callee == self && "cross-function calls not yet supported");
+  // Call: args into ABI registers, call the callee's entry, result from rax.
+  // Values live across the call sit in callee-saved registers or slots (both
+  // survive the call), kept out of caller-saved by fixed intervals.  The callee
+  // may be this function or any other in the module — same encoding either way,
+  // and a not-yet-emitted callee is just a forward fixup.
+  void call(x64::Label callee_label, ir::Instruction const& inst, ir::Call const& c) {
     std::vector<std::pair<regalloc::Location, regalloc::Location>> pm;
     for (std::size_t i = 0; i < c.args.size(); ++i)
       pm.emplace_back(regalloc::Location{kArgRegs[i]}, loc(c.args[i]));
     for (auto const& m : regalloc::sequentialize_parallel_moves(pm)) move(m);
-    a.call(entry_label);
+    a.call(callee_label);
     x64::Gpr const d = dest(inst.result_id, kScratch1);
     if (d != x64::Gpr::rax) a.mov_rr(d, x64::Gpr::rax);
     store(inst.result_id, d);
@@ -242,10 +273,11 @@ void guard_no_i1_values(ir::Function const& fn, DefMap const& def) {
   (void)is_icmp;
 }
 
-}  // namespace
-
-auto compile(ir::Module const& mod, ir::FunctionId fid) -> x64::ExecBuffer {
-  auto const& fn   = mod.functions[fid.value];
+// Emit one function into the module's assembler, binding `self_label` at its
+// prologue.  `func_label` is the module's label-per-function table, so a call
+// site can name any callee whether or not it has been emitted yet.
+void emit_function(x64::Assembler& a, ir::Function const& fn,
+                   x64::Label self_label, std::vector<x64::Label> const& func_label) {
   auto const n     = regalloc::compute_numbering(fn);
   auto const iv    = regalloc::build_intervals(fn, n);
   auto const alloc = regalloc::allocate(fn, n, iv);
@@ -267,10 +299,7 @@ auto compile(ir::Module const& mod, ir::FunctionId fid) -> x64::ExecBuffer {
   // up to 16 bytes so rsp stays 16-aligned at every call.
   std::uint32_t const frame = ((8u * (num_saved + alloc.num_spill_slots)) + 15u) & ~15u;
 
-  x64::Assembler a;
   Emitter e{a, alloc, num_saved};
-
-  x64::Label func_entry = a.new_label();  // recursion target (start of prologue)
 
   std::vector<x64::Label> block_label;
   block_label.reserve(fn.blocks.size());
@@ -292,8 +321,8 @@ auto compile(ir::Module const& mod, ir::FunctionId fid) -> x64::ExecBuffer {
     return x64::Mem{x64::Gpr::rbp, -static_cast<std::int32_t>(8 * (i + 1))};
   };
 
-  // ── Prologue ──
-  a.bind(func_entry);
+  // ── Prologue ── (the call target: `self_label` is bound at its first byte)
+  a.bind(self_label);
   a.push(x64::Gpr::rbp);
   a.mov_rr(x64::Gpr::rbp, x64::Gpr::rsp);
   if (frame > 0) a.sub_ri(x64::Gpr::rsp, static_cast<std::int32_t>(frame));
@@ -322,7 +351,7 @@ auto compile(ir::Module const& mod, ir::FunctionId fid) -> x64::ExecBuffer {
     for (auto iid : blk.instructions) {
       auto const& inst = fn.instructions[iid.value];
       if (auto const* c = std::get_if<ir::Call>(&inst.payload))
-        e.call(fid, func_entry, inst, *c);
+        e.call(func_label[c->callee.value], inst, *c);
       else
         e.instruction(inst);
     }
@@ -356,9 +385,29 @@ auto compile(ir::Module const& mod, ir::FunctionId fid) -> x64::ExecBuffer {
     for (auto const& m : res.edges[i].moves) e.move(m);
     a.jmp(block_label[res.edges[i].to.value]);
   }
+}
 
+}  // namespace
+
+auto compile(ir::Module const& mod) -> CompiledModule {
+  x64::Assembler a;
+
+  // One label per function, all allocated before anything is emitted, so a call
+  // to a later-declared function is an ordinary forward reference.
+  std::vector<x64::Label> func_label;
+  func_label.reserve(mod.functions.size());
+  for (std::size_t i = 0; i < mod.functions.size(); ++i) func_label.push_back(a.new_label());
+
+  std::vector<std::size_t> entry_offsets;
+  entry_offsets.reserve(mod.functions.size());
+  for (std::size_t i = 0; i < mod.functions.size(); ++i) {
+    entry_offsets.push_back(a.size());   // the prologue starts at the current end
+    emit_function(a, mod.functions[i], func_label[i], func_label);
+  }
+
+  // One finalize (every fixup must be resolved) and one buffer for the module.
   a.finalize();
-  return a.executable_copy();
+  return CompiledModule{a.executable_copy(), std::move(entry_offsets)};
 }
 
 }  // namespace mljit::codegen

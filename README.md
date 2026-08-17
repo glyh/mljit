@@ -20,11 +20,12 @@ tiny ANTLR frontend
 
 There is no materialized machine IR: the register allocator produces side-tables over untouched SSA, and the emitter is a direct fold over SSA into the code buffer.
 
-Implemented: the i64 slice — arithmetic, comparisons, block jumps and conditional branches, block parameters, self-recursive fixed-arity calls, and i64 returns. Both demo functions (recursive `fib`, iterative `gcd`) compile natively and match the interpreter across inputs. The register allocator is Wimmer-Franz linear scan on SSA with whole-interval Belady spilling.
+Implemented: the i64 slice — arithmetic, comparisons, block jumps and conditional branches, block parameters, fixed-arity calls (self-recursive, cross-function, and mutually recursive), and i64 returns. Both demo functions (recursive `fib`, iterative `gcd`) compile natively and match the interpreter across inputs. The register allocator is Wimmer-Franz linear scan on SSA with whole-interval Belady spilling.
+
+Compilation is whole-module and eager: every function is emitted into one shared `ExecBuffer` in declaration order, so a call site is a direct 5-byte `call rel32` to the callee's label and forward references resolve through the assembler's ordinary fixups. The price is that every call target must be co-located in that buffer — no host/runtime helper calls, no per-function recompilation ([design](docs/wayfinder/tickets/design-module-level-jit-compilation.md), [open follow-up](docs/wayfinder/tickets/support-out-of-range-call-targets.md)).
 
 Known gaps, all reported as clean `error: jit: unsupported ...` diagnostics rather than crashes — `--backend=interp` handles every one of them:
 
-- **cross-function calls** — only self-recursion is lowered natively ([design settled](docs/wayfinder/tickets/design-module-level-jit-compilation.md), implementation pending);
 - **i1 as a value** — an `icmp` must fuse into the branch that follows it;
 - **more than 6 parameters or call arguments**;
 - `bench`, `--emit-x64`, and structured tracing are specified but not implemented.
@@ -96,4 +97,4 @@ Dependency scope is governed by [`docs/dependency-policy.md`](docs/dependency-po
 
 ## Design planning
 
-The design map lives in [`docs/wayfinder/mljit-design-map.md`](docs/wayfinder/mljit-design-map.md), with per-decision tickets in `docs/wayfinder/tickets/`. Open tickets track module-level compilation (cross-function calls), i1 materialization, and structured trace events.
+The design map lives in [`docs/wayfinder/mljit-design-map.md`](docs/wayfinder/mljit-design-map.md), with per-decision tickets in `docs/wayfinder/tickets/`. Open tickets track i1 materialization, out-of-range/host call targets, and structured trace events.

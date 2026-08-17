@@ -218,21 +218,54 @@ TEST_CASE("cli: run rejects an unknown backend and unknown flags", "[cli]") {
 
 // ── JIT capability gaps surface as diagnostics, never asserts ──
 
-TEST_CASE("cli: jit reports a cross-function call as unsupported", "[cli]") {
+TEST_CASE("cli: jit runs a cross-function call natively", "[cli]") {
   auto const path = source_file("run-crossfn",
                                 "fun helper(x) = x + 1\n"
                                 "fun main(x) = helper(x) * 2\n");
 
   auto const jit = cli({"run", path, "5"});
-  CHECK(jit.code == 1);
-  CHECK(jit.out.empty());
-  CHECK(jit.err.contains("error: jit: unsupported cross-function call to @helper"));
-  CHECK(jit.err.contains("try --backend=interp"));
+  CHECK(jit.code == 0);
+  CHECK(jit.err.empty());
+  CHECK(jit.out == "12\n");
 
-  // The suggested escape hatch really works.
+  // Both backends agree.
   auto const interp = cli({"run", "--backend=interp", path, "5"});
   CHECK(interp.code == 0);
-  CHECK(interp.out == "12\n");
+  CHECK(interp.out == jit.out);
+}
+
+TEST_CASE("cli: jit runs mutual recursion natively", "[cli]") {
+  // is_even calls is_odd before is_odd is emitted: a forward call fixup.
+  auto const path = source_file("run-mutual",
+                                "fun is_even(n) = if n == 0 then 1 else is_odd(n - 1)\n"
+                                "fun is_odd(n) = if n == 0 then 0 else is_even(n - 1)\n");
+
+  auto const jit = cli({"run", "--entry=is_even", path, "7"});
+  CHECK(jit.code == 0);
+  CHECK(jit.out == "0\n");
+
+  auto const interp = cli({"run", "--backend=interp", "--entry=is_even", path, "8"});
+  CHECK(interp.out == cli({"run", "--entry=is_even", path, "8"}).out);
+}
+
+TEST_CASE("cli: a jit gap in any function blocks the whole module", "[cli]") {
+  // main is trivially compilable, but the module is compiled as a whole, so the
+  // gap in `weird` must be reported before anything runs.
+  auto const path = source_file("run-modulegap",
+                                "fun weird(x) = let c = x < 10; d = x + 1 in\n"
+                                "  if c then d else 0 end\n"
+                                "fun main(x) = x + 1\n");
+
+  auto const jit = cli({"run", path, "5"});
+  CHECK(jit.code == 1);
+  CHECK(jit.out.empty());
+  CHECK(jit.err.contains("error: jit: unsupported "));
+  CHECK(jit.err.contains("@weird"));
+  CHECK(jit.err.contains("try --backend=interp"));
+
+  auto const interp = cli({"run", "--backend=interp", path, "5"});
+  CHECK(interp.code == 0);
+  CHECK(interp.out == "6\n");
 }
 
 TEST_CASE("cli: jit reports an unfusable branch condition as unsupported", "[cli]") {
